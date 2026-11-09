@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://talha-quraishi.github.io/inverta-studio/sitemap.xml
