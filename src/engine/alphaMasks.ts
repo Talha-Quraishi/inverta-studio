@@ -1,4 +1,5 @@
 import type { LogoVersion } from './types';
+import { resolveAssetUrl } from '../utils/assetUrl';
 
 export interface MaskData {
   alphaMap: Float32Array;
@@ -24,13 +25,13 @@ export class AlphaMaskManager {
 
     this.initPromise = (async () => {
       const [old48, old96, new48, new96, hw48, hw96, star84] = await Promise.all([
-        this.loadImage('/masks/bg_48.png').catch(() => null),
-        this.loadImage('/masks/bg_96.png').catch(() => null),
-        this.loadImage('/masks/sparkle-2026-48.png').catch(() => null),
-        this.loadImage('/masks/sparkle-2026-96.png').catch(() => null),
-        this.loadImage('/masks/sparkle-hw-48.png').catch(() => null),
-        this.loadImage('/masks/sparkle-hw-96.png').catch(() => null),
-        this.loadImage('/masks/gemini-star_paired_star_mask.png').catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/bg_48.png')).catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/bg_96.png')).catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/sparkle-2026-48.png')).catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/sparkle-2026-96.png')).catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/sparkle-hw-48.png')).catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/sparkle-hw-96.png')).catch(() => null),
+        this.loadImage(resolveAssetUrl('/masks/gemini-star_paired_star_mask.png')).catch(() => null),
       ]);
 
       if (old48) this.alphaMap48 = this.calculateAlphaMap(old48, 48, 48);

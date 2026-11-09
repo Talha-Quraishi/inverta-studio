@@ -9,7 +9,7 @@ import { watermarkEngine } from './engine/watermarkEngine';
 import { processVideo } from './engine/videoEngine';
 import { DEFAULT_SETTINGS } from './engine/types';
 import type { ProcessedItem, WatermarkSettings } from './engine/types';
-import { Loader2 } from 'lucide-react';
+import { Loader2, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -398,7 +398,42 @@ export const App: React.FC = () => {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
               {/* Main Viewport Column */}
               <div className="lg:col-span-8 xl:col-span-9 flex flex-col gap-4">
-                {activeItem?.mediaType === 'video' ? (
+                {activeItem?.status === 'error' ? (
+                  <div className="h-[480px] rounded-xl border border-red-200 dark:border-red-900/40 bg-red-50/40 dark:bg-red-950/20 flex flex-col items-center justify-center p-8 gap-4 select-none">
+                    <div className="w-12 h-12 rounded-full bg-red-100 dark:bg-red-900/50 flex items-center justify-center text-red-600 dark:text-red-400">
+                      <AlertTriangle className="w-6 h-6" />
+                    </div>
+                    <div className="text-center max-w-md flex flex-col gap-1.5">
+                      <span className="text-sm font-semibold text-zinc-950 dark:text-white">
+                        Processing Failed
+                      </span>
+                      <p className="text-xs text-zinc-600 dark:text-zinc-400 font-mono break-words bg-white/60 dark:bg-black/30 p-2.5 rounded-lg border border-zinc-200/50 dark:border-white/5">
+                        {activeItem.error || 'Failed to process file. Please verify codec and format.'}
+                      </p>
+                      <span className="text-[11px] text-zinc-500 mt-1">
+                        {activeItem.mediaType === 'video'
+                          ? 'Client-side WebCodecs requires H.264 MP4 videos in supported browsers (Chrome, Edge, Safari).'
+                          : 'Please ensure image is a valid PNG, WebP, or JPEG.'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-2">
+                      <button
+                        onClick={() => reprocessActiveItem(settings)}
+                        className="px-3 py-1.5 rounded-lg bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 text-xs font-medium flex items-center gap-1.5 hover:opacity-90 transition cursor-pointer shadow-xs"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Retry Processing
+                      </button>
+                      <button
+                        onClick={() => handleRemoveItem(activeItem.id)}
+                        className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-300 text-xs font-medium flex items-center gap-1.5 hover:bg-zinc-100 dark:hover:bg-white/5 transition cursor-pointer shadow-xs"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Remove File
+                      </button>
+                    </div>
+                  </div>
+                ) : activeItem?.mediaType === 'video' ? (
                   activeItem.status === 'done' ? (
                     <VideoPlayerComparison item={activeItem} />
                   ) : (

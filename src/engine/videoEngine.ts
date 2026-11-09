@@ -2,6 +2,7 @@ import { createFile, DataStream } from 'mp4box';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { diffusionFill, dilateMask } from './diffusionFill';
 import type { WatermarkCorner } from './types';
+import { resolveAssetUrl } from '../utils/assetUrl';
 
 export interface VideoSettings {
   baseStrength: number;
@@ -73,8 +74,8 @@ export async function loadAlphaMap(
   img.crossOrigin = 'anonymous';
   await new Promise((resolve, reject) => {
     img.onload = resolve;
-    img.onerror = () => reject(new Error(`Failed to load video mask: ${url}`));
-    img.src = url;
+    img.onerror = () => reject(new Error(`Failed to load video mask: ${url} (resolved to: ${resolveAssetUrl(url)})`));
+    img.src = resolveAssetUrl(url);
   });
 
   const canvas = document.createElement('canvas');
@@ -187,63 +188,85 @@ export async function loadAllMaskCandidates(
   const sizes = Array.from(sizeSet).sort((a, b) => b - a);
   const results: MaskCandidateSpec[] = [];
 
+  const getOrLoad = async (
+    maskUrl: string,
+    size: number,
+    withColor: boolean
+  ): Promise<AlphaMapData | null> => {
+    const cacheKey = `${maskUrl}_${size}_${withColor}`;
+    let alphaMap = maskCache.get(cacheKey);
+    if (!alphaMap) {
+      try {
+        alphaMap = await loadAlphaMap(maskUrl, size, withColor);
+        maskCache.set(cacheKey, alphaMap);
+      } catch (e) {
+        console.warn(`[VideoEngine] Mask load bypassed for ${maskUrl}:`, e);
+        return null;
+      }
+    }
+    return alphaMap;
+  };
+
   for (const ver of versions) {
     for (const size of sizes) {
       if (ver === 'new') {
         const maskUrl = size >= 64 ? '/masks/sparkle-2026-96.png' : '/masks/sparkle-2026-48.png';
-        const withColor = false;
-        const cacheKey = `${maskUrl}_${size}_${withColor}`;
-        let alphaMap = maskCache.get(cacheKey);
-        if (!alphaMap) {
-          alphaMap = await loadAlphaMap(maskUrl, size, withColor);
-          maskCache.set(cacheKey, alphaMap);
+        const alphaMap = await getOrLoad(maskUrl, size, false);
+        if (alphaMap) {
+          results.push({ alphaMap, baseMaskSize: size, maskSize: size, version: ver });
         }
-        results.push({ alphaMap, baseMaskSize: size, maskSize: size, version: ver });
       } else if (ver === 'white') {
         const maskUrl = size >= 64 ? '/masks/sparkle-hw-96.png' : '/masks/sparkle-hw-48.png';
-        const withColor = false;
-        const cacheKey = `${maskUrl}_${size}_${withColor}`;
-        let alphaMap = maskCache.get(cacheKey);
-        if (!alphaMap) {
-          alphaMap = await loadAlphaMap(maskUrl, size, withColor);
-          maskCache.set(cacheKey, alphaMap);
+        const alphaMap = await getOrLoad(maskUrl, size, false);
+        if (alphaMap) {
+          results.push({ alphaMap, baseMaskSize: size, maskSize: size, version: ver });
         }
-        results.push({ alphaMap, baseMaskSize: size, maskSize: size, version: ver });
       } else {
-        // 'old' Classic Gemini Star:
-        // For <= 56px (720p/480p/compressed): use /masks/bg_48.png with withColor = false
-        // For > 56px (1080p/4K): use /masks/gemini-star_paired_star_mask.png with withColor = true (and /masks/bg_96.png)
         if (size <= 56) {
           const monoUrl = '/masks/bg_48.png';
-          const monoKey = `${monoUrl}_${size}_false`;
-          let monoAlpha = maskCache.get(monoKey);
-          if (!monoAlpha) {
-            monoAlpha = await loadAlphaMap(monoUrl, size, false);
-            maskCache.set(monoKey, monoAlpha);
+          const monoAlpha = await getOrLoad(monoUrl, size, false);
+          if (monoAlpha) {
+            results.push({ alphaMap: monoAlpha, baseMaskSize: size, maskSize: size, version: ver });
           }
-          results.push({ alphaMap: monoAlpha, baseMaskSize: size, maskSize: size, version: ver });
         } else {
-          // Native 1080p chromatic paired star mask
           const pairedUrl = '/masks/gemini-star_paired_star_mask.png';
-          const pairedKey = `${pairedUrl}_${size}_true`;
-          let pairedAlpha = maskCache.get(pairedKey);
-          if (!pairedAlpha) {
-            pairedAlpha = await loadAlphaMap(pairedUrl, size, true);
-            maskCache.set(pairedKey, pairedAlpha);
+          const pairedAlpha = await getOrLoad(pairedUrl, size, true);
+          if (pairedAlpha) {
+            results.push({ alphaMap: pairedAlpha, baseMaskSize: size, maskSize: size, version: ver });
           }
-          results.push({ alphaMap: pairedAlpha, baseMaskSize: size, maskSize: size, version: ver });
 
-          // Also include bg_96 for monochromatic fallback
           const monoUrl = '/masks/bg_96.png';
-          const monoKey = `${monoUrl}_${size}_false`;
-          let monoAlpha = maskCache.get(monoKey);
-          if (!monoAlpha) {
-            monoAlpha = await loadAlphaMap(monoUrl, size, false);
-            maskCache.set(monoKey, monoAlpha);
+          const monoAlpha = await getOrLoad(monoUrl, size, false);
+          if (monoAlpha) {
+            results.push({ alphaMap: monoAlpha, baseMaskSize: size, maskSize: size, version: ver });
           }
-          results.push({ alphaMap: monoAlpha, baseMaskSize: size, maskSize: size, version: ver });
         }
       }
+    }
+  }
+
+  // Safety net: procedural astroid 4-point star if network/all masks fail
+  if (results.length === 0) {
+    for (const size of [84, 48]) {
+      const values = new Float32Array(size * size);
+      const center = (size - 1) / 2;
+      const radius = size / 2;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const dx = Math.abs(x - center) / radius;
+          const dy = Math.abs(y - center) / radius;
+          const d = Math.pow(dx, 0.67) + Math.pow(dy, 0.67);
+          if (d <= 1.0) {
+            values[y * size + x] = Math.max(0, 1.0 - d);
+          }
+        }
+      }
+      results.push({
+        alphaMap: { values, width: size, height: size, baseMaskSize: size },
+        baseMaskSize: size,
+        maskSize: size,
+        version: 'old',
+      });
     }
   }
 
