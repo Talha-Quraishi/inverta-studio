@@ -1,0 +1,184 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --bg-app: #f8f9fa;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f1f3f5;
+  --text-main: #090a0c;
+  --text-muted: #64748b;
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+}
+
+.dark {
+  color-scheme: dark;
+  --bg-app: #0b0c0e;
+  --bg-surface: #111316;
+  --bg-surface-elevated: #181a1f;
+  --text-main: #f4f5f6;
+  --text-muted: #a1a1aa;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  overflow-x: clip;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Studio precision scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.25);
+  border-radius: 9999px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.45);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* ==========================================================================
+   Precision Studio Range Slider
+   Eliminates OS-level misalignment, disjointed tracks, and subpixel clipping.
+   ========================================================================== */
+
+.custom-range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 20px;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  outline: none;
+  border: none;
+}
+
+.custom-range-slider:focus {
+  outline: none;
+}
+
+/* --- WebKit (Chrome, Edge, Safari) --- */
+.custom-range-slider::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    var(--slider-fill, #09090b) 0%,
+    var(--slider-fill, #09090b) var(--slider-pct, 0%),
+    var(--slider-track, #e4e4e7) var(--slider-pct, 0%),
+    var(--slider-track, #e4e4e7) 100%
+  );
+  border: none;
+}
+
+.dark .custom-range-slider::-webkit-slider-runnable-track {
+  --slider-fill: #ffffff;
+  --slider-track: rgba(255, 255, 255, 0.14);
+}
+
+.custom-range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #09090b;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.08);
+  margin-top: -4px; /* (4px track - 12px thumb) / 2 = -4px exact mathematical centering */
+  cursor: grab;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+.dark .custom-range-slider::-webkit-slider-thumb {
+  background: #ffffff;
+  border: 2px solid #111316;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.custom-range-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.4);
+}
+
+.custom-range-slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.05);
+}
+
+/* --- Firefox --- */
+.custom-range-slider::-moz-range-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 9999px;
+  background: #e4e4e7;
+  border: none;
+}
+
+.dark .custom-range-slider::-moz-range-track {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.custom-range-slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 9999px;
+  background: #09090b;
+}
+
+.dark .custom-range-slider::-moz-range-progress {
+  background: #ffffff;
+}
+
+.custom-range-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #09090b;
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: grab;
+  box-sizing: border-box;
+}
+
+.dark .custom-range-slider::-moz-range-thumb {
+  background: #ffffff;
+  border: 2px solid #111316;
+}
+
+.custom-range-slider:hover::-moz-range-thumb {
+  transform: scale(1.2);
+}
+
+.custom-range-slider:active::-moz-range-thumb {
+  cursor: grabbing;
+  transform: scale(1.05);
+}
