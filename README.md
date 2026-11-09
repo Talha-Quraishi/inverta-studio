@@ -1,6 +1,6 @@
 # Inverta Studio — Analytical AI Watermark Inversion
 
-[![Live Demo](https://img.shields.io/badge/%F0%9F%9A%80%20Live%20Demo-Try%20inverta-studio%20Now-09090b?style=for-the-badge&logo=githubpages&logoColor=white)](https://talha-quraishi.github.io/inverta-studio/)
+[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-Try_Inverta_Studio-09090b?style=for-the-badge&logo=github&logoColor=white)](https://talha-quraishi.github.io/inverta-studio/)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Pipeline](https://img.shields.io/badge/Pipeline-100%25%20Client--Side-emerald.svg)](#privacy--zero-uploads)
