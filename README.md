@@ -1,4 +1,6 @@
-# Inverta Studio — Analytical AI Watermark Inversion
+# Inverta Studio (Erasio) — Analytical AI Watermark Inversion
+
+[![Live Demo](https://img.shields.io/badge/%F0%9F%9A%80%20Live%20Demo-Try%20Erasio%20Now-09090b?style=for-the-badge&logo=githubpages&logoColor=white)](https://talha-quraishi.github.io/Erasio/)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Pipeline](https://img.shields.io/badge/Pipeline-100%25%20Client--Side-emerald.svg)](#privacy--zero-uploads)
@@ -57,8 +59,8 @@ For saturated core pixels where $\alpha \ge 0.98$ (where original pixel luminanc
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/inverta-studio.git
-cd inverta-studio
+git clone https://github.com/Talha-Quraishi/Erasio.git
+cd Erasio
 
 # Install dependencies
 npm install
