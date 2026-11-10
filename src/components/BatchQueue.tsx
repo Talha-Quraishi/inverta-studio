@@ -55,11 +55,21 @@ export const BatchQueue: React.FC<BatchQueueProps> = ({
                   : 'border-zinc-200 hover:border-zinc-400 dark:border-white/[0.08] dark:hover:border-white/[0.2] opacity-75 hover:opacity-100'
               }`}
             >
-              <img
-                src={item.processedUrl || item.originalUrl}
-                alt={item.name}
-                className="w-full h-full object-cover"
-              />
+              {item.mediaType === 'video' ? (
+                <video
+                  src={item.processedUrl || item.originalUrl}
+                  muted
+                  playsInline
+                  preload="metadata"
+                  className="w-full h-full object-cover pointer-events-none"
+                />
+              ) : (
+                <img
+                  src={item.processedUrl || item.originalUrl}
+                  alt={item.name}
+                  className="w-full h-full object-cover"
+                />
+              )}
 
               {/* Media type tag */}
               <div className="absolute top-1 left-1 pointer-events-none">
@@ -94,6 +104,7 @@ export const BatchQueue: React.FC<BatchQueueProps> = ({
                   onRemoveItem(item.id);
                 }}
                 title="Remove item"
+                aria-label={`Remove ${item.name}`}
                 className="absolute top-1 right-1 p-0.5 rounded bg-black/90 text-zinc-300 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer z-10"
               >
                 <X className="w-3 h-3" />

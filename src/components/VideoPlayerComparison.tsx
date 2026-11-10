@@ -67,23 +67,40 @@ export const VideoPlayerComparison: React.FC<VideoPlayerComparisonProps> = ({ it
 
   // Synchronized play / pause
   const togglePlay = useCallback(() => {
+    const orig = originalVideoRef.current;
+    const clean = cleanedVideoRef.current;
     if (isPlaying) {
-      originalVideoRef.current?.pause();
-      cleanedVideoRef.current?.pause();
+      orig?.pause();
+      clean?.pause();
       setIsPlaying(false);
     } else {
-      originalVideoRef.current?.play();
-      cleanedVideoRef.current?.play();
+      if (orig && clean) {
+        clean.currentTime = orig.currentTime;
+      }
+      orig?.play().catch(() => {});
+      clean?.play().catch(() => {});
       setIsPlaying(true);
     }
   }, [isPlaying]);
 
-  // Synchronized seek
+  // Synchronized seek & active drift compensation
   const handleTimeUpdate = () => {
-    const v = cleanedVideoRef.current || originalVideoRef.current;
-    if (v) {
-      setCurrentTime(v.currentTime);
-      if (v.duration && !duration) setDuration(v.duration);
+    const orig = originalVideoRef.current;
+    const clean = cleanedVideoRef.current;
+    if (orig) {
+      setCurrentTime(orig.currentTime);
+      if (orig.duration && !duration) setDuration(orig.duration);
+
+      // Active drift correction: keep cleaned video aligned to master original video within 40ms
+      if (clean && !clean.seeking && !orig.seeking) {
+        const drift = Math.abs(orig.currentTime - clean.currentTime);
+        if (drift > 0.04) {
+          clean.currentTime = orig.currentTime;
+        }
+      }
+    } else if (clean) {
+      setCurrentTime(clean.currentTime);
+      if (clean.duration && !duration) setDuration(clean.duration);
     }
   };
 

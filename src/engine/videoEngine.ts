@@ -322,6 +322,14 @@ function demuxMp4(buffer: ArrayBuffer): Promise<{
     mp4file.appendBuffer(copyBuffer);
     mp4file.flush();
 
+    if (!videoTrack) {
+      return reject(new Error('Failed to demux MP4: No valid video track found.'));
+    }
+
+    if (videoSamples.length === 0) {
+      return reject(new Error('Failed to demux MP4: No video samples extracted.'));
+    }
+
     // Extract SPS/PPS description
     let videoDescription: Uint8Array | null = null;
     if (videoTrack) {
@@ -908,7 +916,8 @@ export function cleanFrame(
   settings: VideoSettings
 ): ImageData {
   const { data, width, height } = imageData;
-  const out = new Uint8ClampedArray(data);
+  // Mutate directly in-place on the frame buffer to eliminate multi-gigabyte memory churn
+  const out = imageData.data;
   const alphaMap = target.alphaMap;
   const u = alphaMap.width;
   const h = alphaMap.height;
@@ -994,7 +1003,7 @@ export function cleanFrame(
     );
   }
 
-  return new ImageData(out, width, height);
+  return imageData;
 }
 
 export interface VideoProcessResult {
@@ -1036,6 +1045,12 @@ export async function processVideo(
   // Preload resolution-aware mask candidate templates across versions
   const maskTemplates = await loadAllMaskCandidates(s.logoVersion, s.maskScale, width, height);
 
+  const isAacAudio = Boolean(
+    audioTrack &&
+    audioTrack.codec &&
+    (audioTrack.codec.startsWith('mp4a.40') || audioTrack.codec.toLowerCase().includes('aac'))
+  );
+
   // Setup MP4 Muxer
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -1046,7 +1061,7 @@ export async function processVideo(
       width,
       height,
     },
-    audio: audioTrack
+    audio: isAacAudio
       ? {
           codec: 'aac',
           sampleRate: audioTrack.audio.sample_rate,
@@ -1067,8 +1082,35 @@ export async function processVideo(
     },
   });
 
+  // Dynamically resolve optimal H.264 profile & level based on resolution & framerate
+  let targetProfile = 'avc1.640028';
+  if (width > 1920 || height > 1080) {
+    targetProfile = 'avc1.640033'; // Level 5.1 for 4K / QHD
+  } else if (fps > 30) {
+    targetProfile = 'avc1.64002a'; // Level 4.2 for 1080p60
+  }
+
+  const candidateCodecs = [targetProfile, 'avc1.640028', 'avc1.4d4028', 'avc1.42001f'];
+  let chosenCodec = 'avc1.42001f';
+  for (const candCodec of candidateCodecs) {
+    try {
+      const checkConfig: VideoEncoderConfig = {
+        codec: candCodec,
+        width,
+        height,
+        bitrate,
+        framerate: fps,
+      };
+      const res = await VideoEncoder.isConfigSupported(checkConfig);
+      if (res.supported) {
+        chosenCodec = candCodec;
+        break;
+      }
+    } catch {}
+  }
+
   const encoderConfig: VideoEncoderConfig = {
-    codec: 'avc1.640028', // H.264 High Profile
+    codec: chosenCodec,
     width,
     height,
     bitrate,
@@ -1076,11 +1118,6 @@ export async function processVideo(
     framerate: fps,
     avc: { format: 'avc' },
   };
-
-  const isSupported = await VideoEncoder.isConfigSupported(encoderConfig);
-  if (!isSupported.supported) {
-    encoderConfig.codec = 'avc1.42001f'; // Fallback to Baseline
-  }
   encoder.configure(encoderConfig);
 
   const canvas = new OffscreenCanvas(width, height);
@@ -1328,39 +1365,46 @@ export async function processVideo(
 
   onProgress?.({ stage: 'process', ratio: 0 });
 
-  for (let i = 0; i < videoSamples.length; i++) {
-    if (decoderError) throw decoderError;
-    const sample = videoSamples[i];
+  try {
+    for (let i = 0; i < videoSamples.length; i++) {
+      if (decoderError) throw decoderError;
+      const sample = videoSamples[i];
 
-    decoder.decode(
-      new EncodedVideoChunk({
-        type: sample.is_sync ? 'key' : 'delta',
-        timestamp: Math.round((1e6 * sample.cts) / sample.timescale),
-        duration: Math.round((1e6 * sample.duration) / sample.timescale),
-        data: sample.data,
-      })
-    );
+      decoder.decode(
+        new EncodedVideoChunk({
+          type: sample.is_sync ? 'key' : 'delta',
+          timestamp: Math.round((1e6 * sample.cts) / sample.timescale),
+          duration: Math.round((1e6 * sample.duration) / sample.timescale),
+          data: sample.data,
+        })
+      );
 
-    // Dynamic backpressure prevents hardware queue exhaustion and dropped frames
-    while (decoder.decodeQueueSize > 5 || encoder.encodeQueueSize > 5) {
-      await new Promise((r) => setTimeout(r, 4));
+      // Dynamic backpressure prevents hardware queue exhaustion and dropped frames
+      while (decoder.decodeQueueSize > 5 || encoder.encodeQueueSize > 5) {
+        await new Promise((r) => setTimeout(r, 4));
+      }
     }
-  }
 
-  if (!detectionDone) {
-    executeDetection();
-  }
+    if (!detectionDone) {
+      executeDetection();
+    }
 
-  await decoder.flush();
-  await encoder.flush();
-  decoder.close();
-  encoder.close();
+    await decoder.flush();
+    await encoder.flush();
+  } finally {
+    try {
+      if (decoder.state !== 'closed') decoder.close();
+    } catch {}
+    try {
+      if (encoder.state !== 'closed') encoder.close();
+    } catch {}
+  }
 
   if (decoderError) throw decoderError;
   if (encoderError) throw encoderError;
 
-  // Copy AAC audio samples untouched
-  if (audioTrack && audioSamples.length > 0) {
+  // Copy AAC audio samples untouched if AAC
+  if (isAacAudio && audioSamples.length > 0) {
     try {
       const sampleRate = audioTrack.audio.sample_rate;
       const channels = audioTrack.audio.channel_count;

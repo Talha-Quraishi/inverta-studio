@@ -224,7 +224,7 @@ export const App: React.FC = () => {
       }
       setIsProcessing(false);
     },
-    [engineReady, activeId, processImage, processVideoItem, settings]
+    [engineReady, processImage, processVideoItem, settings]
   );
 
   // Re-process active item when settings or nudge change (with instant fast path)
@@ -233,7 +233,11 @@ export const App: React.FC = () => {
       if (!activeItem) return;
       setIsProcessing(true);
       if (activeItem.mediaType === 'video') {
+        const prevProcessedUrl = activeItem.processedUrl;
         const updated = await processVideoItem(activeItem, newSettings);
+        if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
+          URL.revokeObjectURL(prevProcessedUrl);
+        }
         setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
       } else if (activeItem.sourceImageData) {
         // Fast path: Invert directly from cached memory buffer in ~3ms without re-rasterizing
@@ -269,7 +273,11 @@ export const App: React.FC = () => {
           console.error('Fast reprocess error:', err);
         }
       } else {
+        const prevProcessedUrl = activeItem.processedUrl;
         const updated = await processImage(activeItem, newSettings);
+        if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
+          URL.revokeObjectURL(prevProcessedUrl);
+        }
         setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
       }
       setIsProcessing(false);
@@ -332,6 +340,15 @@ export const App: React.FC = () => {
   };
 
   const handleRemoveItem = (id: string) => {
+    const itemToRemove = items.find((item) => item.id === id);
+    if (itemToRemove) {
+      if (itemToRemove.originalUrl && itemToRemove.originalUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(itemToRemove.originalUrl);
+      }
+      if (itemToRemove.processedUrl && itemToRemove.processedUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(itemToRemove.processedUrl);
+      }
+    }
     setItems((prev) => prev.filter((item) => item.id !== id));
     if (activeId === id) {
       const remaining = items.filter((item) => item.id !== id);
@@ -341,6 +358,14 @@ export const App: React.FC = () => {
   };
 
   const handleClearAll = () => {
+    items.forEach((item) => {
+      if (item.originalUrl && item.originalUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(item.originalUrl);
+      }
+      if (item.processedUrl && item.processedUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(item.processedUrl);
+      }
+    });
     setItems([]);
     setActiveId('');
   };

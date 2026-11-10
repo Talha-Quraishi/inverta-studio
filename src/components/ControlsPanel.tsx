@@ -40,15 +40,27 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   const [showAdvanced, setShowAdvanced] = useState(true);
   const [localMaskScale, setLocalMaskScale] = useState(settings.maskScale);
   const [localFillRadius, setLocalFillRadius] = useState(settings.fillRadius);
+  const [prevSettings, setPrevSettings] = useState({
+    maskScale: settings.maskScale,
+    fillRadius: settings.fillRadius,
+  });
   const debounceTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  React.useEffect(() => {
+  // Synchronize local slider values if external settings reset/update
+  if (prevSettings.maskScale !== settings.maskScale || prevSettings.fillRadius !== settings.fillRadius) {
+    setPrevSettings({
+      maskScale: settings.maskScale,
+      fillRadius: settings.fillRadius,
+    });
     setLocalMaskScale(settings.maskScale);
-  }, [settings.maskScale]);
+    setLocalFillRadius(settings.fillRadius);
+  }
 
   React.useEffect(() => {
-    setLocalFillRadius(settings.fillRadius);
-  }, [settings.fillRadius]);
+    return () => {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    };
+  }, []);
 
   const handleMaskScaleChange = (val: number) => {
     setLocalMaskScale(val);
