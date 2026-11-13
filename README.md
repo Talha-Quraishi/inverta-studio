@@ -109,7 +109,7 @@ Open your browser at `http://localhost:5173`.
 npm run build
 ```
 
-Production artifacts are compiled into the `dist/` directory. Pushes to `main` are built and deployed to GitHub Pages by `.github/workflows/deploy.yml`.
+Production artifacts are compiled into the `dist/` directory. Pushes to `main` are built and published to the `gh-pages` branch by `.github/workflows/deploy.yml`.
 
 ---
 
