@@ -6,7 +6,7 @@ interface DropZoneProps {
   isCompact?: boolean;
 }
 
-export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected, isCompact = false }) => {
+const DropZoneImpl: React.FC<DropZoneProps> = ({ onFilesSelected, isCompact = false }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -145,3 +145,5 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected, isCompact =
     </div>
   );
 };
+
+export const DropZone = React.memo(DropZoneImpl);

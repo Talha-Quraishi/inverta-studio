@@ -1,8 +1,14 @@
 import { createFile, DataStream } from 'mp4box';
+import type { MP4ArrayBuffer, Mp4Sample, Mp4Track } from 'mp4box';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { diffusionFill, dilateMask } from './diffusionFill';
 import type { WatermarkCorner } from './types';
 import { resolveAssetUrl } from '../utils/assetUrl';
+
+// Diagnostics are only emitted in development builds.
+const debugLog = (...args: unknown[]): void => {
+  if (import.meta.env.DEV) console.log(...args);
+};
 
 export interface VideoSettings {
   baseStrength: number;
@@ -274,24 +280,24 @@ export async function loadAllMaskCandidates(
 }
 
 function demuxMp4(buffer: ArrayBuffer): Promise<{
-  videoTrack: any;
-  audioTrack: any;
-  videoSamples: any[];
-  audioSamples: any[];
+  videoTrack: Mp4Track;
+  audioTrack: Mp4Track | null;
+  videoSamples: Mp4Sample[];
+  audioSamples: Mp4Sample[];
   videoDescription: Uint8Array | null;
 }> {
   return new Promise((resolve, reject) => {
     const mp4file = createFile();
-    const videoSamples: any[] = [];
-    const audioSamples: any[] = [];
-    let videoTrack: any = null;
-    let audioTrack: any = null;
+    const videoSamples: Mp4Sample[] = [];
+    const audioSamples: Mp4Sample[] = [];
+    let videoTrack: Mp4Track | null = null;
+    let audioTrack: Mp4Track | null = null;
 
-    mp4file.onError = (e: any) => reject(new Error('MP4Box error: ' + e));
+    mp4file.onError = (e: unknown) => reject(new Error('MP4Box error: ' + String(e)));
 
-    mp4file.onReady = (info: any) => {
-      videoTrack = info.videoTracks && info.videoTracks[0];
-      audioTrack = info.audioTracks && info.audioTracks[0];
+    mp4file.onReady = (info) => {
+      videoTrack = info.videoTracks?.[0] ?? null;
+      audioTrack = info.audioTracks?.[0] ?? null;
 
       if (!videoTrack) return reject(new Error('No video track found'));
 
@@ -302,9 +308,8 @@ function demuxMp4(buffer: ArrayBuffer): Promise<{
       mp4file.start();
     };
 
-    mp4file.onSamples = (_id: number, user: string, samples: any[]) => {
-      const isVideo = user === 'video';
-      const target = isVideo ? videoSamples : audioSamples;
+    mp4file.onSamples = (_id, user, samples) => {
+      const target = user === 'video' ? videoSamples : audioSamples;
       for (const s of samples) {
         target.push({
           data: s.data.slice(0),
@@ -317,9 +322,11 @@ function demuxMp4(buffer: ArrayBuffer): Promise<{
       }
     };
 
-    const copyBuffer = buffer.slice(0) as any;
-    copyBuffer.fileStart = 0;
-    mp4file.appendBuffer(copyBuffer);
+    // The caller owns this freshly-read buffer and does not reuse it, so it is handed to
+    // mp4box directly instead of being duplicated (saves one full copy of the file in RAM).
+    const input = buffer as MP4ArrayBuffer;
+    input.fileStart = 0;
+    mp4file.appendBuffer(input);
     mp4file.flush();
 
     if (!videoTrack) {
@@ -332,23 +339,20 @@ function demuxMp4(buffer: ArrayBuffer): Promise<{
 
     // Extract SPS/PPS description
     let videoDescription: Uint8Array | null = null;
-    if (videoTrack) {
-      const track = mp4file.getTrackById(videoTrack.id);
-      const entries = track?.mdia?.minf?.stbl?.stsd?.entries || [];
-      for (const entry of entries) {
-        const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
-        if (!box) continue;
-        const DS = DataStream;
-        if (!DS) break;
-        const stream = new DS(undefined, 0, DS.BIG_ENDIAN);
-        box.write(stream);
-        videoDescription = new Uint8Array(stream.buffer, 8);
-        break;
-      }
+    const track = mp4file.getTrackById((videoTrack as Mp4Track).id);
+    const entries = track?.mdia?.minf?.stbl?.stsd?.entries || [];
+    for (const entry of entries) {
+      const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+      if (!box) continue;
+      if (typeof DataStream === 'undefined') break;
+      const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+      box.write(stream);
+      videoDescription = new Uint8Array(stream.buffer, 8);
+      break;
     }
 
     resolve({
-      videoTrack,
+      videoTrack: videoTrack as Mp4Track,
       audioTrack,
       videoSamples,
       audioSamples,
@@ -1035,6 +1039,7 @@ export async function processVideo(
     await demuxMp4(videoBuffer);
   onProgress?.({ stage: 'demux', ratio: 1 });
 
+  if (!videoTrack.video) throw new Error('Video track has no dimensions.');
   const width = videoTrack.video.width;
   const height = videoTrack.video.height;
   const frameCount = videoSamples.length || 1;
@@ -1045,7 +1050,9 @@ export async function processVideo(
   // Preload resolution-aware mask candidate templates across versions
   const maskTemplates = await loadAllMaskCandidates(s.logoVersion, s.maskScale, width, height);
 
+  const audioInfo = audioTrack?.audio ?? null;
   const isAacAudio = Boolean(
+    audioInfo &&
     audioTrack &&
     audioTrack.codec &&
     (audioTrack.codec.startsWith('mp4a.40') || audioTrack.codec.toLowerCase().includes('aac'))
@@ -1064,8 +1071,8 @@ export async function processVideo(
     audio: isAacAudio
       ? {
           codec: 'aac',
-          sampleRate: audioTrack.audio.sample_rate,
-          numberOfChannels: audioTrack.audio.channel_count,
+          sampleRate: audioInfo!.sample_rate,
+          numberOfChannels: audioInfo!.channel_count,
         }
       : undefined,
   });
@@ -1073,7 +1080,7 @@ export async function processVideo(
   // Bitrate calculation
   const bitrate = Math.round(width * height * fps * 0.12 * s.bitrateMult);
 
-  let encoderError: any = null;
+  let encoderError: unknown = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
     error: (e) => {
@@ -1125,8 +1132,39 @@ export async function processVideo(
   if (!ctx) throw new Error('OffscreenCanvas 2D context unavailable');
 
   let processedFrames = 0;
+
+  // Per-frame progress is throttled: updating React state for every decoded frame
+  // re-renders the whole app dozens of times per second and starves the main thread.
+  let lastProgressEmit = 0;
+  const reportFrameProgress = () => {
+    const now = performance.now();
+    if (now - lastProgressEmit < 100 && processedFrames < frameCount) return;
+    lastProgressEmit = now;
+    onProgress?.({ stage: 'process', ratio: Math.min(1, processedFrames / frameCount) });
+  };
+
+  // After detection only a small padded window around the watermark needs to be read back
+  // to JS and edited; the rest of the frame never leaves the canvas.
+  const REGION_PAD = 8;
+  let cleanRegion: {
+    rx: number;
+    ry: number;
+    rw: number;
+    rh: number;
+    target: TargetCandidate;
+  } | null = null;
+  const getCleanRegion = () => {
+    const tc = targetCandidate;
+    if (cleanRegion || !tc) return cleanRegion;
+    const rx = Math.max(0, tc.x - REGION_PAD);
+    const ry = Math.max(0, tc.y - REGION_PAD);
+    const rw = Math.min(width, tc.x + tc.alphaMap.width + REGION_PAD) - rx;
+    const rh = Math.min(height, tc.y + tc.alphaMap.height + REGION_PAD) - ry;
+    cleanRegion = { rx, ry, rw, rh, target: { ...tc, x: tc.x - rx, y: tc.y - ry } };
+    return cleanRegion;
+  };
   const keyframeInterval = Math.max(1, 2 * fps);
-  let decoderError: any = null;
+  let decoderError: unknown = null;
 
   interface BufferedDecodedFrame {
     imgData: ImageData;
@@ -1203,7 +1241,7 @@ export async function processVideo(
       hasWatermark = false;
       targetCandidate = null;
       detectionDone = true;
-      console.log(
+      debugLog(
         `[VideoEngine] No watermark detected (score < ${s.corrThreshold}). Preserving all frames 100% untouched.`
       );
       flushBufferedFrames();
@@ -1228,7 +1266,7 @@ export async function processVideo(
           y: cand.y,
           alphaMap: cand.alphaMap,
         });
-        console.log(
+        debugLog(
           `[VideoEngine] Frame ${bestFrame.frameIndex} score: ${cand.score.toFixed(3)}, distant frame ${vf.frameIndex} score: ${vScore.toFixed(3)}`
         );
         // Real watermark is stationary across frames
@@ -1236,7 +1274,7 @@ export async function processVideo(
           hasWatermark = true;
           targetCandidate = cand;
         } else {
-          console.log('[VideoEngine] Transient visual feature rejected by multi-frame temporal check.');
+          debugLog('[VideoEngine] Transient visual feature rejected by multi-frame temporal check.');
           hasWatermark = false;
           targetCandidate = null;
         }
@@ -1257,10 +1295,10 @@ export async function processVideo(
     detectionDone = true;
 
     if (hasWatermark && targetCandidate) {
-      console.log(
+      debugLog(
         `[VideoEngine] Watermark CONFIRMED: '${targetCandidate.version}' at (${targetCandidate.x}, ${targetCandidate.y}) via ${targetCandidate.method} with correlation score ${targetCandidate.score.toFixed(3)} [template: ${targetCandidate.alphaMap.width}x${targetCandidate.alphaMap.height}, frame: ${width}x${height}]`
       );
-      console.log(
+      debugLog(
         `[VideoEngine] Candidate details: opacity=${targetCandidate.opacity}, hasColor=${targetCandidate.alphaMap.colorValues !== undefined}, edgeCleanup=${!!targetCandidate.edgeCleanup}`
       );
       onProgress?.({
@@ -1270,7 +1308,7 @@ export async function processVideo(
         detectedCorner: targetCandidate.corner,
       });
     } else {
-      console.log(
+      debugLog(
         `[VideoEngine] No watermark detected (score < ${s.corrThreshold}). Preserving all frames 100% untouched.`
       );
       onProgress?.({
@@ -1290,58 +1328,58 @@ export async function processVideo(
         ctx.drawImage(frame, 0, 0, width, height);
         frame.close();
 
-        const imgData = ctx.getImageData(0, 0, width, height);
-
-        if (!detectionDone) {
-          // Compute bottom-right quadrant luminance
-          const sx = Math.floor(width * 0.7);
-          const sy = Math.floor(height * 0.7);
-          let sum = 0, count = 0;
-          for (let y = sy; y < height; y += 4) {
-            for (let x = sx; x < width; x += 4) {
-              const idx = (y * width + x) * 4;
-              sum += (imgData.data[idx] + imgData.data[idx + 1] + imgData.data[idx + 2]) / 3;
-              count++;
-            }
+        if (detectionDone) {
+          // Streaming path: edit only the watermark window, then encode straight from the canvas.
+          const region = hasWatermark ? getCleanRegion() : null;
+          if (region) {
+            const regionData = ctx.getImageData(region.rx, region.ry, region.rw, region.rh);
+            cleanFrame(regionData, region.target, s);
+            ctx.putImageData(regionData, region.rx, region.ry);
           }
-          const brLum = count > 0 ? sum / count : 0;
 
-          initialBuffer.push({
-            imgData,
-            timestamp,
-            duration,
-            frameIndex: processedFrames++,
-            brLum,
-          });
-
-          // Trigger detection if we have gathered enough frames or an illuminated frame after at least 12 frames
-          if (initialBuffer.length >= BUFFER_LIMIT || (initialBuffer.length >= 12 && brLum > 30)) {
-            executeDetection();
-          }
-        } else {
-          // Direct streaming path
-          const frameData = hasWatermark && targetCandidate
-            ? cleanFrame(imgData, targetCandidate, s)
-            : imgData;
-
-          const videoFrameInit: VideoFrameBufferInit = {
-            format: 'RGBA',
-            codedWidth: width,
-            codedHeight: height,
-            timestamp,
-          };
+          const frameInit: VideoFrameInit = { timestamp };
           if (duration !== null && duration !== undefined) {
-            videoFrameInit.duration = duration;
+            frameInit.duration = duration;
           }
 
-          const cleanFrameObj = new VideoFrame(frameData.data.buffer, videoFrameInit);
+          const cleanFrameObj = new VideoFrame(canvas, frameInit);
           encoder.encode(cleanFrameObj, {
             keyFrame: processedFrames % keyframeInterval === 0,
           });
           cleanFrameObj.close();
 
           processedFrames++;
-          onProgress?.({ stage: 'process', ratio: processedFrames / frameCount });
+          reportFrameProgress();
+          return;
+        }
+
+        // Detection path: buffer the first frames in full so they can be analysed.
+        const imgData = ctx.getImageData(0, 0, width, height);
+
+        // Compute bottom-right quadrant luminance
+        const sx = Math.floor(width * 0.7);
+        const sy = Math.floor(height * 0.7);
+        let sum = 0, count = 0;
+        for (let y = sy; y < height; y += 4) {
+          for (let x = sx; x < width; x += 4) {
+            const idx = (y * width + x) * 4;
+            sum += (imgData.data[idx] + imgData.data[idx + 1] + imgData.data[idx + 2]) / 3;
+            count++;
+          }
+        }
+        const brLum = count > 0 ? sum / count : 0;
+
+        initialBuffer.push({
+          imgData,
+          timestamp,
+          duration,
+          frameIndex: processedFrames++,
+          brLum,
+        });
+
+        // Trigger detection if we have gathered enough frames or an illuminated frame after at least 12 frames
+        if (initialBuffer.length >= BUFFER_LIMIT || (initialBuffer.length >= 12 && brLum > 30)) {
+          executeDetection();
         }
       } catch (e) {
         decoderError = e;
@@ -1363,6 +1401,33 @@ export async function processVideo(
     description: videoDescription || undefined,
   });
 
+  const MAX_DECODE_QUEUE = 8;
+  const MAX_ENCODE_QUEUE = 8;
+
+  // Event-driven backpressure: wakes on the codecs' `dequeue` events instead of polling
+  // on a 4 ms timer, so the pipeline stays full without adding latency per frame.
+  const waitForQueueRoom = (): Promise<void> =>
+    new Promise((resolve) => {
+      const hasRoom = () =>
+        Boolean(decoderError || encoderError) ||
+        (decoder.decodeQueueSize <= MAX_DECODE_QUEUE && encoder.encodeQueueSize <= MAX_ENCODE_QUEUE);
+      if (hasRoom()) return resolve();
+
+      const finish = () => {
+        decoder.removeEventListener('dequeue', check);
+        encoder.removeEventListener('dequeue', check);
+        clearInterval(safety);
+        resolve();
+      };
+      const check = () => {
+        if (hasRoom()) finish();
+      };
+      decoder.addEventListener('dequeue', check);
+      encoder.addEventListener('dequeue', check);
+      // Safety net in case a dequeue event is coalesced or never fires.
+      const safety = setInterval(check, 50);
+    });
+
   onProgress?.({ stage: 'process', ratio: 0 });
 
   try {
@@ -1379,10 +1444,8 @@ export async function processVideo(
         })
       );
 
-      // Dynamic backpressure prevents hardware queue exhaustion and dropped frames
-      while (decoder.decodeQueueSize > 5 || encoder.encodeQueueSize > 5) {
-        await new Promise((r) => setTimeout(r, 4));
-      }
+      // Backpressure prevents hardware queue exhaustion and dropped frames
+      await waitForQueueRoom();
     }
 
     if (!detectionDone) {
@@ -1406,8 +1469,8 @@ export async function processVideo(
   // Copy AAC audio samples untouched if AAC
   if (isAacAudio && audioSamples.length > 0) {
     try {
-      const sampleRate = audioTrack.audio.sample_rate;
-      const channels = audioTrack.audio.channel_count;
+      const sampleRate = audioInfo!.sample_rate;
+      const channels = audioInfo!.channel_count;
       let rateIdx = AAC_SAMPLE_RATES.indexOf(sampleRate);
       if (rateIdx < 0) rateIdx = 4; // 44.1kHz default
 

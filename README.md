@@ -41,6 +41,9 @@ You don't need to clone or install anything to use Inverta Studio:
 3. **Compare & Export**: Inspect with the real-time split/swipe comparison slider and 2.2× corner loupe, then click **Export Cleaned Video (MP4)** or **Save Image (PNG)**.
 
 > [!NOTE]
+> **Limits**: videos are processed entirely in memory, so files over 1 GiB are rejected with a clear message. Fonts use your system font stack, so the app makes no third-party requests.
+
+> [!NOTE]
 > **100% In-Browser Privacy**: Your videos and photos never leave your device. All demuxing, decoding, mathematical inversion, and re-encoding runs locally in browser RAM using the native WebCodecs API and Canvas 2D.
 
 ---
@@ -80,7 +83,7 @@ For saturated core pixels where $\alpha \ge 0.98$ (where original pixel luminanc
 If you wish to run or modify Inverta Studio locally:
 
 ### Prerequisites
-- Node.js 18+
+- Node.js 20.19+ or 22.12+ (required by Vite 8)
 - npm or pnpm
 - A modern Chromium-based browser (Chrome, Edge, Brave, Opera) with WebCodecs support.
 
@@ -106,7 +109,7 @@ Open your browser at `http://localhost:5173`.
 npm run build
 ```
 
-Production artifacts are compiled into the `dist/` directory.
+Production artifacts are compiled into the `dist/` directory. Pushes to `main` are built and deployed to GitHub Pages by `.github/workflows/deploy.yml`.
 
 ---
 
@@ -115,7 +118,7 @@ Production artifacts are compiled into the `dist/` directory.
 ```
 inverta-studio/
 ├── public/
-│   ├── masks/                 # Calibrated alpha mask templates (48px, 84px, 96px)
+│   ├── masks/                 # Calibrated alpha mask templates (48px and 96px)
 │   ├── robots.txt             # Search engine crawl directives
 │   ├── sitemap.xml            # Search engine indexing sitemap
 │   └── og-preview.png         # Social share preview image (1200x630)
@@ -137,7 +140,7 @@ inverta-studio/
 │   │   └── assetUrl.ts        # Environment-aware asset path resolver for subpaths
 │   ├── App.tsx                # Studio layout, theme provider, and zero-hang pipeline
 │   └── index.css              # Tailwind CSS v4 design tokens and studio typography
-└── dist/                      # Static production bundle deployed to GitHub Pages
+└── dist/                      # Build output (generated, not committed)
 ```
 
 ---

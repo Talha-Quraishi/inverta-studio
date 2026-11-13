@@ -25,7 +25,7 @@ interface ControlsPanelProps {
   hasOutput?: boolean;
 }
 
-export const ControlsPanel: React.FC<ControlsPanelProps> = ({
+const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
   settings,
   result,
   onUpdateSettings,
@@ -362,3 +362,5 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
     </div>
   );
 };
+
+export const ControlsPanel = React.memo(ControlsPanelImpl);

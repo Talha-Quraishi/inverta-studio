@@ -17,7 +17,7 @@ interface VideoPlayerComparisonProps {
   item: ProcessedItem;
 }
 
-export const VideoPlayerComparison: React.FC<VideoPlayerComparisonProps> = ({ item }) => {
+const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [viewMode, setViewMode] = useState<'split' | 'slider' | 'cleaned' | 'original'>('slider');
@@ -646,3 +646,5 @@ export const VideoPlayerComparison: React.FC<VideoPlayerComparisonProps> = ({ it
     </div>
   );
 };
+
+export const VideoPlayerComparison = React.memo(VideoPlayerComparisonImpl);

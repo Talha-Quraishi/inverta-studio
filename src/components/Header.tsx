@@ -8,7 +8,7 @@ interface HeaderProps {
   onClearAll?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({
+const HeaderImpl: React.FC<HeaderProps> = ({
   theme,
   onToggleTheme,
   hasItems = false,
@@ -86,3 +86,5 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+
+export const Header = React.memo(HeaderImpl);
