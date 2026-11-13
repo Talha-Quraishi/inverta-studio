@@ -10,7 +10,7 @@ interface ComparisonSliderProps {
   height: number;
 }
 
-export const ComparisonSlider: React.FC<ComparisonSliderProps> = ({
+const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
   originalUrl,
   cleanedUrl,
   result,
@@ -365,3 +365,5 @@ export const ComparisonSlider: React.FC<ComparisonSliderProps> = ({
     </div>
   );
 };
+
+export const ComparisonSlider = React.memo(ComparisonSliderImpl);

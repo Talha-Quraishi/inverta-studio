@@ -4,13 +4,16 @@
     <meta charset="utf-8" />
     <title>Inverta Studio</title>
     <script>
-      // Single Page Application redirect for GitHub Pages
-      sessionStorage.redirect = location.href;
-      location.replace('/inverta-studio/');
+      // Inverta Studio is a single page; send any unknown path to the app root,
+      // derived from the current URL so it works on custom domains and subpaths.
+      (function () {
+        var root = location.pathname.indexOf('/inverta-studio/') === 0 ? '/inverta-studio/' : '/';
+        location.replace(root);
+      })();
     </script>
-    <meta http-equiv="refresh" content="0;URL='/inverta-studio/'" />
+    <noscript><meta http-equiv="refresh" content="0;URL='./'" /></noscript>
   </head>
   <body>
-    <p>Redirecting to <a href="/inverta-studio/">Inverta Studio</a>...</p>
+    <p>Redirecting to <a href="./">Inverta Studio</a>&hellip;</p>
   </body>
 </html>

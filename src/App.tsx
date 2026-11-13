@@ -1,15 +1,20 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { DropZone } from './components/DropZone';
 import { ComparisonSlider } from './components/ComparisonSlider';
 import { ControlsPanel } from './components/ControlsPanel';
 import { BatchQueue } from './components/BatchQueue';
-import { VideoPlayerComparison } from './components/VideoPlayerComparison';
+// Loaded on demand: the video player is only needed once a video has been processed.
+const VideoPlayerComparison = lazy(() =>
+  import('./components/VideoPlayerComparison').then((m) => ({ default: m.VideoPlayerComparison }))
+);
 import { watermarkEngine } from './engine/watermarkEngine';
-import { processVideo } from './engine/videoEngine';
 import { DEFAULT_SETTINGS } from './engine/types';
 import type { ProcessedItem, WatermarkSettings } from './engine/types';
 import { Loader2, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
+
+// Whole files are held in memory while demuxing, so very large videos would crash the tab.
+const MAX_VIDEO_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
 export const App: React.FC = () => {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -27,6 +32,16 @@ export const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
 
   const activeItem = items.find((i) => i.id === activeId);
+
+  // Always-current snapshot so stable callbacks can read the latest items without re-creating themselves.
+  const itemsRef = useRef<ProcessedItem[]>(items);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  const activeIdRef = useRef(activeId);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   // Sync theme with HTML root class and local storage
   useEffect(() => {
@@ -113,6 +128,13 @@ export const App: React.FC = () => {
   const processVideoItem = useCallback(
     async (item: ProcessedItem, currentSettings: WatermarkSettings): Promise<ProcessedItem> => {
       try {
+        if (item.file.size > MAX_VIDEO_BYTES) {
+          throw new Error(
+            `Video is ${(item.file.size / 1024 / 1024).toFixed(0)} MB. Files over ${MAX_VIDEO_BYTES / 1024 / 1024} MB can't be processed in-browser; please trim or compress it first.`
+          );
+        }
+        // Loaded lazily so the demuxer/muxer code isn't part of the initial bundle.
+        const { processVideo } = await import('./engine/videoEngine');
         const buffer = await item.file.arrayBuffer();
         const videoRes = await processVideo(
           buffer,
@@ -326,8 +348,8 @@ export const App: React.FC = () => {
     document.body.removeChild(a);
   };
 
-  const handleDownloadAll = () => {
-    items.forEach((item) => {
+  const handleDownloadAll = useCallback(() => {
+    itemsRef.current.forEach((item) => {
       if (item.processedUrl && item.status === 'done') {
         const a = document.createElement('a');
         a.href = item.processedUrl;
@@ -337,9 +359,12 @@ export const App: React.FC = () => {
         document.body.removeChild(a);
       }
     });
-  };
+  }, []);
 
-  const handleRemoveItem = (id: string) => {
+  const handleSelectItem = useCallback((id: string) => setActiveId(id), []);
+
+  const handleRemoveItem = useCallback((id: string) => {
+    const items = itemsRef.current;
     const itemToRemove = items.find((item) => item.id === id);
     if (itemToRemove) {
       if (itemToRemove.originalUrl && itemToRemove.originalUrl.startsWith('blob:')) {
@@ -350,15 +375,15 @@ export const App: React.FC = () => {
       }
     }
     setItems((prev) => prev.filter((item) => item.id !== id));
-    if (activeId === id) {
+    if (activeIdRef.current === id) {
       const remaining = items.filter((item) => item.id !== id);
       if (remaining.length > 0) setActiveId(remaining[0].id);
       else setActiveId('');
     }
-  };
+  }, []);
 
-  const handleClearAll = () => {
-    items.forEach((item) => {
+  const handleClearAll = useCallback(() => {
+    itemsRef.current.forEach((item) => {
       if (item.originalUrl && item.originalUrl.startsWith('blob:')) {
         URL.revokeObjectURL(item.originalUrl);
       }
@@ -368,7 +393,7 @@ export const App: React.FC = () => {
     });
     setItems([]);
     setActiveId('');
-  };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#f8f9fa] dark:bg-[#0b0c0e] text-zinc-950 dark:text-[#f4f5f6] flex flex-col font-sans selection:bg-zinc-900 selection:text-white dark:selection:bg-white dark:selection:text-black transition-colors">
@@ -460,7 +485,15 @@ export const App: React.FC = () => {
                   </div>
                 ) : activeItem?.mediaType === 'video' ? (
                   activeItem.status === 'done' ? (
-                    <VideoPlayerComparison item={activeItem} />
+                    <Suspense
+                      fallback={
+                        <div className="h-[480px] rounded-xl border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#0c0d10] flex items-center justify-center">
+                          <Loader2 className="w-6 h-6 text-zinc-950 dark:text-white animate-spin" />
+                        </div>
+                      }
+                    >
+                      <VideoPlayerComparison item={activeItem} />
+                    </Suspense>
                   ) : (
                     <div className="h-[480px] rounded-xl border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#0c0d10] flex flex-col items-center justify-center p-8 gap-3 select-none">
                       <Loader2 className="w-6 h-6 text-zinc-950 dark:text-white animate-spin" />
@@ -500,7 +533,7 @@ export const App: React.FC = () => {
                 <BatchQueue
                   items={items}
                   activeId={activeId}
-                  onSelectItem={setActiveId}
+                  onSelectItem={handleSelectItem}
                   onRemoveItem={handleRemoveItem}
                   onDownloadAll={handleDownloadAll}
                 />
