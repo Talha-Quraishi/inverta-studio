@@ -84,6 +84,7 @@ export interface ProcessedItem {
   status: 'idle' | 'processing' | 'done' | 'error';
   result?: RemovalResult;
   videoProgress?: { stage: string; ratio: number };
+  videoFps?: number;
   detectedVersion?: 'old' | 'new' | 'white';
   error?: string;
 }

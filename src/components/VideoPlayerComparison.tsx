@@ -112,14 +112,14 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
   };
 
   const stepFrame = useCallback((frames: number) => {
-    const frameDuration = 1 / 24; // assume 24fps
+    const frameDuration = 1 / (item.videoFps && item.videoFps > 0 ? item.videoFps : 30);
     const v = cleanedVideoRef.current || originalVideoRef.current;
     if (!v) return;
     const newTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + frames * frameDuration));
     if (cleanedVideoRef.current) cleanedVideoRef.current.currentTime = newTime;
     if (originalVideoRef.current) originalVideoRef.current.currentTime = newTime;
     setCurrentTime(newTime);
-  }, []);
+  }, [item.videoFps]);
 
   const handleRestart = useCallback(() => {
     if (cleanedVideoRef.current) cleanedVideoRef.current.currentTime = 0;
@@ -219,11 +219,12 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
     window.addEventListener('pointerup', onUp);
     window.addEventListener('mousemove', onMove, { passive: true });
     window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchmove', (e: TouchEvent) => {
+    const onTouchMove = (e: TouchEvent) => {
       if (isDraggingSlider.current && e.touches[0]) {
         handleSliderMove(e.touches[0].clientX);
       }
-    }, { passive: true });
+    };
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
     window.addEventListener('touchend', onUp);
 
     return () => {
@@ -231,6 +232,7 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onUp);
       if (rafId.current !== null) {
         cancelAnimationFrame(rafId.current);
@@ -241,7 +243,16 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
   // Video keyboard ergonomics
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Never hijack browser/OS shortcuts (Ctrl+R, Cmd+Z, ...) or typing in form fields.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) {
+        return;
+      }
 
       if (e.code === 'Space') {
         e.preventDefault();

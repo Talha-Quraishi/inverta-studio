@@ -28,6 +28,8 @@ export interface VideoSettings {
   fillMode: 'auto' | 'on' | 'off';
   fillThreshold: number;
   fillRadius: number;
+  /** Manual override (top-left of the watermark, in frame pixels), e.g. from the nudge arrows. */
+  forcePosition?: { x: number; y: number } | null;
 }
 
 export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
@@ -1018,6 +1020,14 @@ export interface VideoProcessResult {
   confidence: number;
   position: { x: number; y: number };
   size: number;
+  fps: number;
+}
+
+export interface ProcessVideoOptions {
+  /** The untouched source file; returned as-is when no watermark is found (no re-encode). */
+  originalFile?: Blob;
+  /** Aborts processing; rejects with an AbortError. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1026,8 +1036,13 @@ export interface VideoProcessResult {
 export async function processVideo(
   videoBuffer: ArrayBuffer,
   customSettings?: Partial<VideoSettings>,
-  onProgress?: (progress: VideoProgress) => void
+  onProgress?: (progress: VideoProgress) => void,
+  options?: ProcessVideoOptions
 ): Promise<VideoProcessResult> {
+  const throwIfAborted = () => {
+    if (options?.signal?.aborted) throw new DOMException('Processing was cancelled.', 'AbortError');
+  };
+  throwIfAborted();
   const s: VideoSettings = { ...DEFAULT_VIDEO_SETTINGS, ...customSettings };
 
   if (typeof VideoDecoder === 'undefined' || typeof VideoEncoder === 'undefined') {
@@ -1045,7 +1060,9 @@ export async function processVideo(
   const frameCount = videoSamples.length || 1;
   const timescale = videoSamples[0]?.timescale || videoTrack.timescale || 30000;
   const avgDuration = videoSamples.reduce((acc, cur) => acc + cur.duration, 0) / frameCount;
-  const fps = Math.max(1, Math.round(timescale / avgDuration));
+  // Guard against zero/invalid sample durations (would give Infinity/NaN and break the bitrate maths).
+  const rawFps = avgDuration > 0 ? Math.round(timescale / avgDuration) : 30;
+  const fps = Number.isFinite(rawFps) ? Math.min(240, Math.max(1, rawFps)) : 30;
 
   // Preload resolution-aware mask candidate templates across versions
   const maskTemplates = await loadAllMaskCandidates(s.logoVersion, s.maskScale, width, height);
@@ -1143,6 +1160,27 @@ export async function processVideo(
     onProgress?.({ stage: 'process', ratio: Math.min(1, processedFrames / frameCount) });
   };
 
+  // Building a VideoFrame straight from a canvas is fast, but not every browser supports it
+  // for OffscreenCanvas. Fall back to an RGBA buffer copy if the fast path throws.
+  let canvasFrameSupported = true;
+  const frameFromCanvas = (init: VideoFrameInit): VideoFrame => {
+    if (canvasFrameSupported) {
+      try {
+        return new VideoFrame(canvas, init);
+      } catch {
+        canvasFrameSupported = false;
+      }
+    }
+    const full = ctx.getImageData(0, 0, width, height);
+    return new VideoFrame(full.data.buffer, {
+      format: 'RGBA',
+      codedWidth: width,
+      codedHeight: height,
+      timestamp: init.timestamp ?? 0,
+      ...(init.duration !== undefined ? { duration: init.duration } : {}),
+    });
+  };
+
   // After detection only a small padded window around the watermark needs to be read back
   // to JS and edited; the rest of the frame never leaves the canvas.
   const REGION_PAD = 8;
@@ -1237,20 +1275,37 @@ export async function processVideo(
       if (bestCand && bestCand.score >= 0.97) break; // Decisive near-perfect match found
     }
 
-    if (!bestCand || bestCand.score < s.corrThreshold) {
+    // Manual override (nudge): keep the detected template but move it, and re-score it there
+    // so the reported confidence is honest. A forced position is never rejected by thresholds.
+    let forced = false;
+    if (s.forcePosition && bestCand) {
+      const base: TargetCandidate = bestCand;
+      const fx = Math.min(Math.max(0, width - base.alphaMap.width), Math.max(0, Math.round(s.forcePosition.x)));
+      const fy = Math.min(Math.max(0, height - base.alphaMap.height), Math.max(0, Math.round(s.forcePosition.y)));
+      bestCand = {
+        ...base,
+        x: fx,
+        y: fy,
+        score: scoreCandidate(bestFrame.imgData, { x: fx, y: fy, alphaMap: base.alphaMap }),
+      };
+      forced = true;
+    }
+
+    if (!bestCand || (!forced && bestCand.score < s.corrThreshold)) {
       hasWatermark = false;
       targetCandidate = null;
       detectionDone = true;
       debugLog(
-        `[VideoEngine] No watermark detected (score < ${s.corrThreshold}). Preserving all frames 100% untouched.`
+        `[VideoEngine] No watermark detected (score < ${s.corrThreshold}). Original file will be returned untouched.`
       );
-      flushBufferedFrames();
+      // Nothing to clean: the buffered frames are not needed, the original file is returned as-is.
+      initialBuffer.length = 0;
       return;
     }
 
     const cand = bestCand;
 
-    if (cand.score >= 0.70) {
+    if (forced || cand.score >= 0.70) {
       // Definitive watermark match (>= 70%) -> confirmed watermark
       hasWatermark = true;
       targetCandidate = cand;
@@ -1317,7 +1372,11 @@ export async function processVideo(
       });
     }
 
-    flushBufferedFrames();
+    if (hasWatermark) {
+      flushBufferedFrames();
+    } else {
+      initialBuffer.length = 0;
+    }
   };
 
   const decoder = new VideoDecoder({
@@ -1342,7 +1401,7 @@ export async function processVideo(
             frameInit.duration = duration;
           }
 
-          const cleanFrameObj = new VideoFrame(canvas, frameInit);
+          const cleanFrameObj = frameFromCanvas(frameInit);
           encoder.encode(cleanFrameObj, {
             keyFrame: processedFrames % keyframeInterval === 0,
           });
@@ -1432,6 +1491,7 @@ export async function processVideo(
 
   try {
     for (let i = 0; i < videoSamples.length; i++) {
+      throwIfAborted();
       if (decoderError) throw decoderError;
       const sample = videoSamples[i];
 
@@ -1446,14 +1506,23 @@ export async function processVideo(
 
       // Backpressure prevents hardware queue exhaustion and dropped frames
       await waitForQueueRoom();
+
+      // No watermark found: stop decoding/encoding, the original file is returned untouched.
+      if (detectionDone && !hasWatermark) break;
     }
 
+    throwIfAborted();
     if (!detectionDone) {
       executeDetection();
     }
 
-    await decoder.flush();
-    await encoder.flush();
+    if (!(detectionDone && !hasWatermark)) {
+      await decoder.flush();
+      // Short clips only emit their last frames on flush(), so detection may still be pending.
+      if (!detectionDone) executeDetection();
+      await encoder.flush();
+    }
+    throwIfAborted();
   } finally {
     try {
       if (decoder.state !== 'closed') decoder.close();
@@ -1461,6 +1530,21 @@ export async function processVideo(
     try {
       if (encoder.state !== 'closed') encoder.close();
     } catch {}
+  }
+
+  // Lossless passthrough: with nothing to remove, re-encoding would only cost time and quality.
+  if (detectionDone && !hasWatermark) {
+    onProgress?.({ stage: 'done', ratio: 1.0 });
+    return {
+      blob: options?.originalFile ?? new Blob([videoBuffer], { type: 'video/mp4' }),
+      hasWatermark: false,
+      detectedVersion: s.logoVersion === 'auto' ? 'old' : s.logoVersion,
+      detectedCorner: 'bottom-right',
+      confidence: 0,
+      position: { x: 0, y: 0 },
+      size: 0,
+      fps,
+    };
   }
 
   if (decoderError) throw decoderError;
@@ -1522,5 +1606,6 @@ export async function processVideo(
     confidence: resolvedTarget ? resolvedTarget.score : 0,
     position: resolvedTarget ? { x: resolvedTarget.x, y: resolvedTarget.y } : { x: 0, y: 0 },
     size: resolvedTarget ? resolvedTarget.alphaMap.width : 0,
+    fps,
   };
 }

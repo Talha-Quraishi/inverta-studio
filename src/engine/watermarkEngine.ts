@@ -93,7 +93,10 @@ export class WatermarkEngine {
 
     if (s.forcePosition && Number.isFinite(s.forcePosition.x) && Number.isFinite(s.forcePosition.y)) {
       const targetSize = s.forcePosition.size || (width > 1024 && height > 1024 ? 96 : 48);
-      const chosen = baseSizes.find((b) => b.size === targetSize) || baseSizes[2];
+      // Exact size if available, otherwise the closest template (never an arbitrary one).
+      const chosen = baseSizes.reduce((best, b) =>
+        Math.abs(b.size - targetSize) < Math.abs(best.size - targetSize) ? b : best
+      );
       const clampedX = Math.max(0, Math.min(width - chosen.size, Math.round(s.forcePosition.x)));
       const clampedY = Math.max(0, Math.min(height - chosen.size, Math.round(s.forcePosition.y)));
       const score = nccAt(data, width, height, chosen.alphaMap, chosen.size, clampedX, clampedY);
@@ -301,7 +304,11 @@ export class WatermarkEngine {
 
     // Retrieve the scaled mask using detected watermark version
     const activeVersion = detection.detectedVersion || (s.logoVersion === 'auto' ? 'old' : s.logoVersion);
-    const scaledMask = this.maskManager.getScaledMask(detection.size, s.maskScale, activeVersion);
+    const scaledMask = this.maskManager.rescaleMask(
+      this.maskManager.getMaskForSize(detection.size, activeVersion),
+      s.maskScale,
+      activeVersion
+    );
     const mask = scaledMask.alphaMap;
     const maskSize = scaledMask.size;
 
@@ -475,7 +482,10 @@ function computeAdaptiveOpacity(
         const invA = 1.0 - effA;
         if (invA <= 1e-4) continue;
 
-        const hIdx = ((originY + y) * width + (originX + x)) * 4;
+        const px = originX + x;
+        const py = originY + y;
+        if (px < 0 || px >= width || py < 0 || py >= height) continue;
+        const hIdx = (py * width + px) * 4;
         const invR = (data[hIdx] - effA * logoValue) / invA;
         const invG = (data[hIdx + 1] - effA * logoValue) / invA;
         const invB = (data[hIdx + 2] - effA * logoValue) / invA;
