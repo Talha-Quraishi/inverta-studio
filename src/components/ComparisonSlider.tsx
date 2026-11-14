@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { ZoomIn, ZoomOut, Maximize2, Crosshair, Eye } from 'lucide-react';
 import type { RemovalResult } from '../engine/types';
 
@@ -10,7 +10,7 @@ interface ComparisonSliderProps {
   height: number;
 }
 
-const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
+export const ComparisonSlider: React.FC<ComparisonSliderProps> = ({
   originalUrl,
   cleanedUrl,
   result,
@@ -28,16 +28,20 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const isDraggingSlider = useRef(false);
+  const isPanningRef = useRef(false);
   const cachedRect = useRef<DOMRect | null>(null);
   const rafId = useRef<number | null>(null);
   const nextPos = useRef<number>(50);
 
-  // Watermark focal center for magnification
-  const wmOriginX = result && width > 0
-    ? Math.round(((result.position.x + result.size / 2) / width) * 100)
+  const hasDetection = result?.success === true;
+
+  // Watermark focal center for magnification. Clamp to the viewport so a mask
+  // touching or crossing a frame edge cannot push the loupe off the stage.
+  const wmOriginX = hasDetection && result && width > 0
+    ? Math.max(0, Math.min(100, Math.round(((result.position.x + result.size / 2) / width) * 100)))
     : 85;
-  const wmOriginY = result && height > 0
-    ? Math.round(((result.position.y + result.size / 2) / height) * 100)
+  const wmOriginY = hasDetection && result && height > 0
+    ? Math.max(0, Math.min(100, Math.round(((result.position.y + result.size / 2) / height) * 100)))
     : 85;
 
   // Toggle corner loupe (2.2x magnification centered directly on watermark)
@@ -54,13 +58,13 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
     }
   }, [isLoupe, wmOriginX]);
 
-  const resetZoom = () => {
+  const resetZoom = useCallback(() => {
     setIsLoupe(false);
     setZoom(1);
     setPan({ x: 0, y: 0 });
-  };
+  }, []);
 
-  // 60-120fps buttery smooth slider movement coordinated via requestAnimationFrame
+  // 60-120fps smooth slider movement coordinated via requestAnimationFrame
   const handleSliderMove = useCallback((clientX: number) => {
     let rect = cachedRect.current;
     if (!rect) {
@@ -82,11 +86,34 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
     }
   }, []);
 
+  const endInteraction = useCallback(() => {
+    isDraggingSlider.current = false;
+    isPanningRef.current = false;
+    setIsPanning(false);
+    cachedRect.current = null;
+    if (rafId.current !== null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+    };
+  }, []);
+
   const handlePointerDown = (e: React.PointerEvent) => {
     // If middle click or shift-click when zoomed: pan
     if (e.button === 1 || (e.button === 0 && e.shiftKey && (zoom > 1 || isLoupe))) {
+      isPanningRef.current = true;
       setIsPanning(true);
       setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // Pointer capture is a progressive enhancement.
+      }
       return;
     }
 
@@ -98,14 +125,16 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
       handleSliderMove(e.clientX);
       try {
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-      } catch {}
+      } catch {
+        // Pointer capture is a progressive enhancement.
+      }
     }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (isDraggingSlider.current) {
       handleSliderMove(e.clientX);
-    } else if (isPanning && (zoom > 1 || isLoupe)) {
+    } else if (isPanningRef.current && (zoom > 1 || isLoupe)) {
       setPan({
         x: e.clientX - panStart.x,
         y: e.clientY - panStart.y,
@@ -113,96 +142,70 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
     }
   };
 
-  const handlePointerUp = (e: React.PointerEvent) => {
-    isDraggingSlider.current = false;
-    setIsPanning(false);
-    cachedRect.current = null;
-    if (rafId.current !== null) {
-      cancelAnimationFrame(rafId.current);
-      rafId.current = null;
-    }
+  const handlePointerEnd = (e: React.PointerEvent) => {
+    endInteraction();
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {}
+    } catch {
+      // Capture may already have been released.
+    }
   };
 
-  // Window-level listeners guarantee uninterrupted slider tracking across all input devices
-  useEffect(() => {
-    const onMove = (e: MouseEvent | PointerEvent) => {
-      if (isDraggingSlider.current) {
-        handleSliderMove(e.clientX);
-      }
-    };
-    const onUp = () => {
-      isDraggingSlider.current = false;
-      setIsPanning(false);
-      cachedRect.current = null;
-      if (rafId.current !== null) {
-        cancelAnimationFrame(rafId.current);
-        rafId.current = null;
-      }
-    };
-
-    window.addEventListener('pointermove', onMove, { passive: true });
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('mousemove', onMove, { passive: true });
-    window.addEventListener('mouseup', onUp);
-    const onTouchMove = (e: TouchEvent) => {
-      if (isDraggingSlider.current && e.touches[0]) {
-        handleSliderMove(e.touches[0].clientX);
-      }
-    };
-    window.addEventListener('touchmove', onTouchMove, { passive: true });
-    window.addEventListener('touchend', onUp);
-
-    return () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onUp);
-      if (rafId.current !== null) {
-        cancelAnimationFrame(rafId.current);
-      }
-    };
-  }, [handleSliderMove]);
-
-  // Keyboard shortcuts for studio-grade ergonomics
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Never hijack browser/OS shortcuts (Ctrl+R, Cmd+Z, ...) or typing in form fields.
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        e.target instanceof HTMLSelectElement ||
-        (e.target instanceof HTMLElement && e.target.isContentEditable)
-      ) {
-        return;
-      }
-
-      if (e.key === 'ArrowLeft') {
+  // Keyboard support is scoped to the focused viewport so arrow keys elsewhere
+  // (for example in the inspector) are never hijacked.
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 5 : 1;
+    switch (e.key) {
+      case 'ArrowLeft':
+      case 'ArrowDown':
         e.preventDefault();
-        setSliderPos((p) => Math.max(0, p - (e.shiftKey ? 5 : 1)));
-      } else if (e.key === 'ArrowRight') {
+        setSliderPos((p) => Math.max(0, p - step));
+        break;
+      case 'ArrowRight':
+      case 'ArrowUp':
         e.preventDefault();
-        setSliderPos((p) => Math.min(100, p + (e.shiftKey ? 5 : 1)));
-      } else if (e.key.toLowerCase() === 'z') {
+        setSliderPos((p) => Math.min(100, p + step));
+        break;
+      case 'Home':
         e.preventDefault();
-        toggleCornerLoupe();
-      } else if (e.key.toLowerCase() === 'f') {
+        setSliderPos(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        setSliderPos(100);
+        break;
+      case '+':
+      case '=':
+        e.preventDefault();
+        setIsLoupe(false);
+        setZoom((z) => Math.min(4, z + 0.5));
+        break;
+      case '-':
+      case '_':
+        e.preventDefault();
+        setIsLoupe(false);
+        setZoom((z) => Math.max(1, z - 0.5));
+        break;
+      case '0':
+      case 'f':
+      case 'F':
         e.preventDefault();
         resetZoom();
-      } else if (e.key.toLowerCase() === 'h') {
+        break;
+      case 'z':
+      case 'Z':
+        e.preventDefault();
+        toggleCornerLoupe();
+        break;
+      case 'h':
+      case 'H':
         e.preventDefault();
         setShowHighlight((prev) => !prev);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleCornerLoupe]);
+        break;
+      default:
+        break;
+    }
+  };
 
   return (
     <div className="flex flex-col gap-3 bg-white dark:bg-[#111316] border border-zinc-200/90 dark:border-white/[0.08] rounded-xl p-3 sm:p-4 select-none shadow-sm transition-colors">
@@ -213,22 +216,32 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
           <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
             {width} × {height} px
           </span>
-          {result && (
-            <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
-              {result.size}×{result.size} at ({result.position.x}, {result.position.y})
-            </span>
-          )}
-          {result?.detectedVersion && (
-            <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
-              Template: {result.detectedVersion === 'old' ? 'Classic Star' : result.detectedVersion === 'new' ? '2026 Sparkle' : 'White Sparkle'}
-            </span>
-          )}
+          {result &&
+            (hasDetection ? (
+              <>
+                <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
+                  {result.size}×{result.size} at ({result.position.x}, {result.position.y})
+                </span>
+                {result.detectedVersion && (
+                  <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
+                    Template: {result.detectedVersion === 'old' ? 'Classic Star' : result.detectedVersion === 'new' ? '2026 Sparkle' : 'White Sparkle'}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-500/10 text-amber-800 dark:text-amber-300 font-mono text-[11px] border border-amber-200 dark:border-amber-500/25">
+                No watermark detected
+              </span>
+            ))}
         </div>
 
         {/* Viewport Tools */}
         <div className="flex items-center gap-1.5">
           <button
+            type="button"
             onClick={() => setShowHighlight((prev) => !prev)}
+            aria-pressed={showHighlight}
+            aria-label="Toggle watermark bounding box"
             title="Toggle Bounding Box (H)"
             className={`p-1.5 rounded transition-colors cursor-pointer border ${
               showHighlight
@@ -240,7 +253,10 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
           </button>
 
           <button
+            type="button"
             onClick={toggleCornerLoupe}
+            aria-pressed={isLoupe}
+            aria-label={isLoupe ? 'Reset corner loupe' : 'Inspect watermark corner at 2.2x'}
             title={isLoupe ? 'Reset Corner Loupe (Z)' : 'Inspect Watermark Corner 2.2x (Z)'}
             className={`flex items-center gap-1 px-2 py-1 rounded border transition text-[11px] font-mono cursor-pointer ${
               isLoupe
@@ -254,27 +270,33 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
 
           <div className="flex items-center gap-0.5 bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06] rounded-md p-0.5">
             <button
+              type="button"
               onClick={() => {
                 setIsLoupe(false);
                 setZoom((z) => Math.min(4, z + 0.5));
               }}
+              aria-label="Zoom in"
               title="Zoom In (+)"
               className="p-1 rounded text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white cursor-pointer"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
             <button
+              type="button"
               onClick={() => {
                 setIsLoupe(false);
                 setZoom((z) => Math.max(1, z - 0.5));
               }}
+              aria-label="Zoom out"
               title="Zoom Out (-)"
               className="p-1 rounded text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white cursor-pointer"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
             <button
+              type="button"
               onClick={resetZoom}
+              aria-label="Reset zoom"
               title="Fit to Screen (F)"
               className="p-1 rounded text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white cursor-pointer"
             >
@@ -290,10 +312,22 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
       {/* Main Interactive Stage */}
       <div
         ref={containerRef}
+        tabIndex={0}
+        role="slider"
+        aria-label="Before and after comparison split"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(sliderPos)}
+        aria-valuetext={`${Math.round(sliderPos)}% original, ${Math.round(100 - sliderPos)}% cleaned`}
+        aria-keyshortcuts="ArrowLeft ArrowRight Home End Z H"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        className="relative w-full aspect-auto max-h-[72vh] min-h-[420px] rounded-lg overflow-hidden bg-[#07080a] border border-zinc-200/50 dark:border-white/[0.06] flex items-center justify-center select-none shadow-sm cursor-ew-resize touch-none"
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
+        onLostPointerCapture={endInteraction}
+        onKeyDown={handleKeyDown}
+        className="relative w-full aspect-auto max-h-[72vh] min-h-[420px] rounded-lg overflow-hidden bg-[#07080a] border border-zinc-200/50 dark:border-white/[0.06] flex items-center justify-center select-none shadow-sm cursor-ew-resize touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900 dark:focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[#111316]"
+        title="Drag to compare. Arrow keys move the split, Z toggles the loupe, H toggles the bounding box."
       >
         <div
           ref={stageRef}
@@ -330,7 +364,7 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
           </div>
 
           {/* Watermark detection bounding box indicator */}
-          {result && showHighlight && (
+          {hasDetection && showHighlight && result && (
             <div
               className="absolute pointer-events-none border border-white/70 bg-white/[0.08] rounded transition-opacity"
               style={{
@@ -352,7 +386,10 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
             style={{ left: `${sliderPos}%` }}
           >
             {/* Center Drag Grip */}
-            <div className="absolute top-1/2 -translate-y-1/2 -left-3.5 w-7 h-7 rounded-full bg-white text-zinc-950 border border-black/20 shadow-lg flex items-center justify-center active:scale-105 transition-transform pointer-events-auto">
+            <div
+              aria-hidden="true"
+              className="absolute top-1/2 -translate-y-1/2 -left-3.5 w-7 h-7 rounded-full bg-white text-zinc-950 border border-black/20 shadow-lg flex items-center justify-center active:scale-105 transition-transform pointer-events-none"
+            >
               <div className="flex gap-0.5">
                 <span className="w-0.5 h-2.5 bg-zinc-800 rounded-full" />
                 <span className="w-0.5 h-2.5 bg-zinc-800 rounded-full" />
@@ -372,5 +409,3 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
     </div>
   );
 };
-
-export const ComparisonSlider = React.memo(ComparisonSliderImpl);

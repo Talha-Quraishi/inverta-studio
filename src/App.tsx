@@ -1,68 +1,141 @@
-import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Header } from './components/Header';
 import { DropZone } from './components/DropZone';
 import { ComparisonSlider } from './components/ComparisonSlider';
 import { ControlsPanel } from './components/ControlsPanel';
 import { BatchQueue } from './components/BatchQueue';
-// Loaded on demand: the video player is only needed once a video has been processed.
-const VideoPlayerComparison = lazy(() =>
-  import('./components/VideoPlayerComparison').then((m) => ({ default: m.VideoPlayerComparison }))
-);
 import { watermarkEngine } from './engine/watermarkEngine';
 import { DEFAULT_SETTINGS } from './engine/types';
 import type { ProcessedItem, WatermarkSettings } from './engine/types';
-import { Loader2, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
+import type { VideoProgress } from './engine/videoEngine';
+import {
+  MAX_FILES_PER_BATCH,
+  MAX_IMAGE_DIMENSION,
+  downloadFileName,
+  encodeCanvasImage,
+  getFileExtension,
+  imageExtensionForMime,
+  isVideoFile,
+  validateFile,
+} from './utils/media';
+import { Loader2, AlertTriangle, RefreshCw, Trash2, X } from 'lucide-react';
 
-// Whole files are held in memory while demuxing, so very large videos would crash the tab.
-const MAX_VIDEO_BYTES = 1024 * 1024 * 1024; // 1 GiB
+const VideoPlayerComparison = React.lazy(() =>
+  import('./components/VideoPlayerComparison').then((module) => ({
+    default: module.VideoPlayerComparison,
+  }))
+);
 
-// localStorage can throw (blocked site data, some private modes); the app must still load.
-const readStoredTheme = (): 'dark' | 'light' => {
-  try {
-    const saved = localStorage.getItem('inverta_theme');
-    if (saved === 'light' || saved === 'dark') return saved;
-  } catch {
-    /* storage unavailable: fall back to default */
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function versionLabel(version?: 'old' | 'new' | 'white'): string {
+  if (version === 'old') return 'Classic Star';
+  if (version === 'new') return '2026 Sparkle';
+  if (version === 'white') return 'White Sparkle';
+  return 'Unknown';
+}
+
+/**
+ * Release a video's optional seekable playback proxy. It is never the same
+ * object URL as the original or cleaned output, but keep the guard so future
+ * reuse of the field cannot revoke a still-displayed result.
+ */
+function releasePlaybackUrl(
+  item: Pick<ProcessedItem, 'playbackUrl' | 'originalUrl' | 'processedUrl'> | undefined,
+  keep?: Pick<ProcessedItem, 'playbackUrl' | 'originalUrl' | 'processedUrl'>
+): void {
+  const url = item?.playbackUrl;
+  if (!item || !url?.startsWith('blob:')) return;
+  if (url === item.originalUrl || url === item.processedUrl) return;
+  if (
+    keep &&
+    (url === keep.playbackUrl || url === keep.originalUrl || url === keep.processedUrl)
+  ) {
+    return;
   }
-  return 'dark';
-};
-
-const isAbortError = (err: unknown): boolean =>
-  err instanceof DOMException && err.name === 'AbortError';
-
-const isVideoFile = (file: File): boolean => file.type.startsWith('video/') || /\.mp4$/i.test(file.name);
+  URL.revokeObjectURL(url);
+}
 
 export const App: React.FC = () => {
-  const [theme, setTheme] = useState<'dark' | 'light'>(readStoredTheme);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('inverta_theme');
+      if (saved === 'light' || saved === 'dark') return saved;
+    }
+    return 'dark';
+  });
 
   const [engineReady, setEngineReady] = useState(false);
   const [items, setItems] = useState<ProcessedItem[]>([]);
   const [activeId, setActiveId] = useState<string>('');
   const [settings, setSettings] = useState<WatermarkSettings>(DEFAULT_SETTINGS);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
 
-  const activeItem = items.find((i) => i.id === activeId);
+  const itemsRef = useRef(items);
+  const settingsRef = useRef(settings);
+  const activeIdRef = useRef(activeId);
 
-  // Always-current snapshot so stable callbacks can read the latest items without re-creating themselves.
-  const itemsRef = useRef<ProcessedItem[]>(items);
+  // Mirror state into refs inside effects so async callbacks and timers always
+  // read the latest committed values without touching refs during render.
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
-  const activeIdRef = useRef(activeId);
-  useEffect(() => {
-    activeIdRef.current = activeId;
-  }, [activeId]);
-  const settingsRef = useRef<WatermarkSettings>(settings);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
-  // Only the most recent re-process job may publish its result; older video jobs are aborted.
-  const jobSeqRef = useRef(0);
-  const jobAbortRef = useRef<AbortController | null>(null);
-  const jobItemIdRef = useRef('');
-  // Cancels in-flight first-time processing when a file is removed.
-  const itemAbortersRef = useRef(new Map<string, AbortController>());
+  const reprocessTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reprocessToken = useRef(0);
+  // One abort controller per item lets a reprocess cancel only its own video
+  // instead of interrupting a different item's batch job.
+  const videoJobsRef = useRef(new Map<string, AbortController>());
+  const processingCount = useRef(0);
+  const cancelRequested = useRef(false);
+  // Per-item generation counters let a newer reprocess win over a batch job
+  // that started with older settings, without discarding other items' work.
+  const itemVersions = useRef(new Map<string, number>());
+
+  const activeItem = items.find((item) => item.id === activeId);
+
+  const beginProcessing = useCallback(() => {
+    processingCount.current += 1;
+    setIsProcessing(true);
+  }, []);
+
+  const endProcessing = useCallback(() => {
+    processingCount.current = Math.max(0, processingCount.current - 1);
+    if (processingCount.current === 0) setIsProcessing(false);
+  }, []);
+
+  // Commit a finished job only if its item still exists. Revoking the fresh
+  // blob URL otherwise prevents leaks when a file is removed mid-processing.
+  const commitProcessed = useCallback((itemId: string, updated: ProcessedItem) => {
+    setItems((prev) => {
+      if (!prev.some((current) => current.id === itemId)) {
+        if (updated.processedUrl?.startsWith('blob:')) {
+          URL.revokeObjectURL(updated.processedUrl);
+        }
+        releasePlaybackUrl(updated);
+        return prev;
+      }
+      return prev.map((current) => (current.id === itemId ? updated : current));
+    });
+  }, []);
+
+  const bumpItemVersion = useCallback((itemId: string) => {
+    const next = (itemVersions.current.get(itemId) ?? 0) + 1;
+    itemVersions.current.set(itemId, next);
+    return next;
+  }, []);
+
+  const getItemVersion = useCallback(
+    (itemId: string) => itemVersions.current.get(itemId) ?? 0,
+    []
+  );
 
   // Sync theme with HTML root class and local storage
   useEffect(() => {
@@ -72,11 +145,7 @@ export const App: React.FC = () => {
     } else {
       root.classList.remove('dark');
     }
-    try {
-      localStorage.setItem('inverta_theme', theme);
-    } catch {
-      /* storage unavailable: theme just won't persist */
-    }
+    localStorage.setItem('inverta_theme', theme);
   }, [theme]);
 
   const toggleTheme = useCallback(() => {
@@ -85,10 +154,38 @@ export const App: React.FC = () => {
 
   // Initialize image engine on mount
   useEffect(() => {
+    let cancelled = false;
     watermarkEngine
       .initialize()
-      .then(() => setEngineReady(true))
-      .catch((err) => console.error('Failed to initialize engine:', err));
+      .then(() => {
+        if (!cancelled) setEngineReady(true);
+      })
+      .catch((err) => {
+        console.error('Failed to initialize engine:', err);
+        if (!cancelled) {
+          setFileError(
+            'The watermark templates could not be loaded. Check that /masks assets are reachable.'
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Abort active work and release object URLs when the studio closes
+  useEffect(() => {
+    const videoJobs = videoJobsRef.current;
+    return () => {
+      if (reprocessTimer.current) clearTimeout(reprocessTimer.current);
+      for (const controller of videoJobs.values()) controller.abort();
+      videoJobs.clear();
+      for (const item of itemsRef.current) {
+        if (item.originalUrl.startsWith('blob:')) URL.revokeObjectURL(item.originalUrl);
+        if (item.processedUrl?.startsWith('blob:')) URL.revokeObjectURL(item.processedUrl);
+        releasePlaybackUrl(item);
+      }
+    };
   }, []);
 
   // Process a single image item through analytical inversion
@@ -96,44 +193,77 @@ export const App: React.FC = () => {
     async (item: ProcessedItem, currentSettings: WatermarkSettings): Promise<ProcessedItem> => {
       try {
         const img = new Image();
-        img.src = item.originalUrl;
+        img.decoding = 'async';
         await new Promise((resolve, reject) => {
           img.onload = resolve;
-          img.onerror = reject;
+          img.onerror = () => reject(new Error('The image could not be decoded'));
+          img.src = item.originalUrl;
         });
 
-        // Yield briefly before raster processing to maintain 60fps UI
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (!img.naturalWidth || !img.naturalHeight) {
+          throw new Error('The image has invalid dimensions');
+        }
+        if (
+          img.naturalWidth > MAX_IMAGE_DIMENSION ||
+          img.naturalHeight > MAX_IMAGE_DIMENSION
+        ) {
+          throw new Error(
+            `Image is ${img.naturalWidth}×${img.naturalHeight}; the ${MAX_IMAGE_DIMENSION}px limit was exceeded`
+          );
+        }
+
+        // Yield briefly before raster processing so the spinner can paint.
+        await delay(10);
 
         const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) throw new Error('Could not get 2D canvas context');
 
         ctx.drawImage(img, 0, 0);
-        const sourceImageData = ctx.getImageData(0, 0, img.width, img.height);
+        const sourceImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-        // Run client-side mathematical inversion
+        if (!watermarkEngine.isReady()) {
+          await watermarkEngine.initialize();
+        }
+
         const { cleanImageData, result } = watermarkEngine.removeWatermark(
           sourceImageData,
           currentSettings
         );
 
+        // No watermark means the source is already the desired output. Reuse the
+        // original file URL so JPEGs and other lossy formats are not re-encoded.
+        if (!result.success) {
+          return {
+            ...item,
+            originalWidth: canvas.width,
+            originalHeight: canvas.height,
+            processedUrl: item.originalUrl,
+            outputExtension:
+              item.file.type && item.file.type !== 'application/octet-stream'
+                ? imageExtensionForMime(item.file.type)
+                : getFileExtension(item.name) || 'png',
+            status: 'done',
+            warning: undefined,
+            detectedVersion: undefined,
+            result,
+          };
+        }
+
         ctx.putImageData(cleanImageData, 0, 0);
-        const cleanedBlob = await new Promise<Blob | null>((resolve) =>
-          canvas.toBlob((b) => resolve(b), item.file.type || 'image/png')
-        );
-        const cleanedUrl = cleanedBlob ? URL.createObjectURL(cleanedBlob) : item.originalUrl;
+        const encoded = await encodeCanvasImage(canvas, item.file.type || 'image/png');
+        const cleanedUrl = URL.createObjectURL(encoded.blob);
 
         return {
           ...item,
-          originalWidth: img.width,
-          originalHeight: img.height,
-          sourceImageData,
+          originalWidth: canvas.width,
+          originalHeight: canvas.height,
           processedUrl: cleanedUrl,
-          processedImageData: cleanImageData,
+          outputExtension: encoded.extension,
           status: 'done',
+          warning: undefined,
           detectedVersion: result.detectedVersion,
           result,
         };
@@ -142,76 +272,99 @@ export const App: React.FC = () => {
         return {
           ...item,
           status: 'error',
-          error: err instanceof Error ? err.message : 'Unknown error',
+          videoProgress: undefined,
+          error: err instanceof Error ? err.message : 'Unknown image processing error',
         };
       }
     },
     []
   );
 
-  // Process a video item via WebCodecs MP4 pipeline
+  // Process a video item via the WebCodecs worker pipeline
   const processVideoItem = useCallback(
     async (
       item: ProcessedItem,
       currentSettings: WatermarkSettings,
-      signal?: AbortSignal
+      signal: AbortSignal
     ): Promise<ProcessedItem> => {
       try {
-        if (item.file.size > MAX_VIDEO_BYTES) {
-          throw new Error(
-            `Video is ${(item.file.size / 1024 / 1024).toFixed(0)} MB. Files over ${MAX_VIDEO_BYTES / 1024 / 1024} MB can't be processed in-browser; please trim or compress it first.`
-          );
-        }
-        // Loaded lazily so the demuxer/muxer code isn't part of the initial bundle.
-        const { processVideo } = await import('./engine/videoEngine');
         const buffer = await item.file.arrayBuffer();
-        const videoRes = await processVideo(
-          buffer,
-          {
-            logoVersion: currentSettings.logoVersion,
-            maskScale: currentSettings.maskScale,
-            corner: currentSettings.corner,
-            fillMode: currentSettings.fillMode,
-            fillThreshold: currentSettings.fillThreshold,
-            fillRadius: currentSettings.fillRadius,
-            forcePosition: currentSettings.forcePosition
-              ? { x: currentSettings.forcePosition.x, y: currentSettings.forcePosition.y }
-              : null,
-          },
-          (prog) => {
-            setItems((prev) =>
-              prev.map((i) =>
-                i.id === item.id
-                  ? {
-                      ...i,
-                      videoProgress: prog,
-                      ...(prog.detectedVersion ? { detectedVersion: prog.detectedVersion } : {}),
-                    }
-                  : i
-              )
-            );
-          },
-          { originalFile: item.file, signal }
-        );
+        if (signal.aborted) {
+          throw new DOMException('Video processing was cancelled.', 'AbortError');
+        }
+
+        const { processVideoInWorker } = await import('./engine/videoProcessor');
+        const progressGate = { lastAt: 0 };
+
+        const videoSettings = {
+          logoVersion: currentSettings.logoVersion,
+          maskScale: currentSettings.maskScale,
+          corner: currentSettings.corner,
+          fillMode: currentSettings.fillMode,
+          fillThreshold: currentSettings.fillThreshold,
+          fillRadius: currentSettings.fillRadius,
+          forcePosition: currentSettings.forcePosition,
+        };
+
+        const forwardProgress = (progress: VideoProgress) => {
+          const now = performance.now();
+          if (progress.ratio < 1 && now - progressGate.lastAt < 100) return;
+          progressGate.lastAt = now;
+          setItems((prev) =>
+            prev.map((current) =>
+              current.id === item.id
+                ? {
+                    ...current,
+                    videoProgress: progress,
+                    ...(progress.detectedVersion
+                      ? { detectedVersion: progress.detectedVersion }
+                      : {}),
+                  }
+                : current
+            )
+          );
+        };
+
+        let videoRes;
+        try {
+          videoRes = await processVideoInWorker(buffer, videoSettings, forwardProgress, signal);
+        } catch (err) {
+          if (!(err instanceof Error) || err.name !== 'VideoWorkerUnavailableError') throw err;
+          // The worker consumed the transferred buffer before discovering that
+          // WebCodecs is window-only in this browser; re-read and retry here.
+          console.warn('Video worker lacks WebCodecs; retrying on the main thread.');
+          const retryBuffer = await item.file.arrayBuffer();
+          if (signal.aborted) {
+            throw new DOMException('Video processing was cancelled.', 'AbortError');
+          }
+          const { processVideo } = await import('./engine/videoEngine');
+          videoRes = await processVideo(retryBuffer, videoSettings, forwardProgress, signal);
+        }
 
         const cleanedUrl = URL.createObjectURL(videoRes.blob);
+        const playbackUrl =
+          videoRes.playbackBlob && !item.playbackUrl
+            ? URL.createObjectURL(videoRes.playbackBlob)
+            : item.playbackUrl;
+        const detectedLabel = versionLabel(videoRes.detectedVersion);
+
         return {
           ...item,
+          playbackUrl,
           processedUrl: cleanedUrl,
+          outputExtension: 'mp4',
+          fps: videoRes.fps,
+          warning: videoRes.warning,
           status: 'done',
-          videoFps: videoRes.fps,
+          videoProgress: undefined,
           detectedVersion: videoRes.hasWatermark ? videoRes.detectedVersion : undefined,
           result: {
-            success: true,
+            success: videoRes.hasWatermark,
             message: videoRes.hasWatermark
-              ? `Auto-detected ${
-                  videoRes.detectedVersion === 'old'
-                    ? 'Classic Star'
-                    : videoRes.detectedVersion === 'new'
-                    ? '2026 Sparkle'
-                    : 'White Sparkle'
-                } in ${videoRes.detectedCorner || 'bottom-right'} (${Math.round(videoRes.confidence * 100)}% match)`
-              : 'No watermark detected — original video preserved untouched',
+              ? `Removed ${detectedLabel} in ${videoRes.detectedCorner || 'bottom-right'} (${Math.round(
+                  videoRes.confidence * 100
+                )}% match${videoRes.audioPreserved ? ', audio preserved' : ''})`
+              : 'No watermark detected — the original video was preserved untouched',
             position: videoRes.position,
             size: videoRes.size,
             confidence: videoRes.confidence,
@@ -225,196 +378,248 @@ export const App: React.FC = () => {
           },
         };
       } catch (err: unknown) {
-        if (isAbortError(err)) throw err; // superseded by a newer job; the caller handles it
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return {
+            ...item,
+            status: 'error',
+            videoProgress: undefined,
+            error: 'Processing cancelled.',
+          };
+        }
         console.error('Video processing error:', err);
         return {
           ...item,
           status: 'error',
-          error: err instanceof Error ? err.message : 'Unknown error',
+          videoProgress: undefined,
+          error: err instanceof Error ? err.message : 'Unknown video processing error',
         };
       }
     },
     []
   );
 
-  // Add files to queue and dispatch with zero UI hang
+  // Add files to queue and dispatch sequentially
   const handleFilesSelected = useCallback(
     async (files: File[]) => {
       if (!files.length) return;
-      if (!engineReady) await watermarkEngine.initialize();
 
-      const newItems: ProcessedItem[] = files.map((file) => {
-        const isVideo = isVideoFile(file);
-        return {
-          id: Math.random().toString(36).substring(2, 9),
-          file,
-          name: file.name,
-          size: file.size,
-          mediaType: isVideo ? 'video' : 'image',
-          originalUrl: URL.createObjectURL(file),
-          originalWidth: 0,
-          originalHeight: 0,
-          status: 'processing',
-        };
-      });
+      const messages: string[] = [];
+      let candidates = files;
+      if (candidates.length > MAX_FILES_PER_BATCH) {
+        messages.push(
+          `Only the first ${MAX_FILES_PER_BATCH} files were added (${files.length} selected).`
+        );
+        candidates = candidates.slice(0, MAX_FILES_PER_BATCH);
+      }
 
-      // Immediately register items into state so thumbnails and loaders appear instantly
+      const validFiles: File[] = [];
+      for (const file of candidates) {
+        const problem = validateFile(file);
+        if (problem) messages.push(problem);
+        else validFiles.push(file);
+      }
+
+      setFileError(messages.length > 0 ? messages.join('\n') : null);
+      if (validFiles.length === 0) return;
+
+      // A debounced settings change from the previous selection must not
+      // reprocess the first file of this new batch.
+      if (reprocessTimer.current) {
+        clearTimeout(reprocessTimer.current);
+        reprocessTimer.current = null;
+      }
+
+      try {
+        if (!watermarkEngine.isReady()) await watermarkEngine.initialize();
+        setEngineReady(true);
+      } catch (err) {
+        console.error('Failed to initialize engine:', err);
+        setFileError('The watermark engine could not be initialized.');
+        return;
+      }
+
+      const newItems: ProcessedItem[] = validFiles.map((file) => ({
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,
+        file,
+        name: file.name,
+        size: file.size,
+        mediaType: isVideoFile(file) ? 'video' : 'image',
+        originalUrl: URL.createObjectURL(file),
+        originalWidth: 0,
+        originalHeight: 0,
+        status: 'processing',
+      }));
+
       setItems((prev) => [...prev, ...newItems]);
-      if (newItems.length > 0) {
-        setActiveId(newItems[0].id);
+      setActiveId(newItems[0].id);
+      if (settingsRef.current.forcePosition) {
+        const cleared = { ...settingsRef.current, forcePosition: null };
+        settingsRef.current = cleared;
+        setSettings(cleared);
       }
-      setIsProcessing(true);
+      beginProcessing();
+      cancelRequested.current = false;
 
-      // Micro-yield: Yield back to browser render loop so loading spinner and DOM paint with zero hang
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      // Let thumbnails and loaders paint before heavy work begins.
+      await delay(40);
 
-      for (const item of newItems) {
-        // Skip files the user already removed while earlier ones were processing.
-        if (!itemsRef.current.some((i) => i.id === item.id)) continue;
-
-        const controller = new AbortController();
-        itemAbortersRef.current.set(item.id, controller);
-        // A manual nudge belongs to one specific file; never apply it to newly added ones.
-        const currentSettings: WatermarkSettings = { ...settingsRef.current, forcePosition: null };
-        try {
-          const processed =
-            item.mediaType === 'video'
-              ? await processVideoItem(item, currentSettings, controller.signal)
-              : await processImage(item, currentSettings);
-
-          if (itemsRef.current.some((i) => i.id === item.id)) {
-            setItems((prev) => prev.map((p) => (p.id === item.id ? processed : p)));
-          } else if (
-            processed.processedUrl &&
-            processed.processedUrl !== processed.originalUrl &&
-            processed.processedUrl.startsWith('blob:')
-          ) {
-            // Removed while processing: release the output instead of leaking it.
-            URL.revokeObjectURL(processed.processedUrl);
+      try {
+        for (let i = 0; i < newItems.length; i++) {
+          if (cancelRequested.current) {
+            const remaining = new Set(newItems.slice(i).map((item) => item.id));
+            setItems((prev) =>
+              prev.map((current) =>
+                remaining.has(current.id) && current.status === 'processing'
+                  ? {
+                      ...current,
+                      status: 'error',
+                      videoProgress: undefined,
+                      error: 'Processing cancelled.',
+                    }
+                  : current
+              )
+            );
+            break;
           }
-        } catch (err) {
-          if (!isAbortError(err)) console.error('Processing error:', err);
-        } finally {
-          itemAbortersRef.current.delete(item.id);
+
+          const item = newItems[i];
+          const itemVersion = getItemVersion(item.id);
+          const controller = item.mediaType === 'video' ? new AbortController() : null;
+          if (controller) {
+            videoJobsRef.current.set(item.id, controller);
+          }
+          const processed =
+            item.mediaType === 'video' && controller
+              ? await processVideoItem(item, settingsRef.current, controller.signal)
+              : await processImage(item, settingsRef.current);
+          if (controller && videoJobsRef.current.get(item.id) === controller) {
+            videoJobsRef.current.delete(item.id);
+          }
+
+          if (getItemVersion(item.id) !== itemVersion) {
+            // A reprocess with newer settings took over this item; keep its
+            // result and release this stale one.
+            if (
+              processed.processedUrl &&
+              processed.processedUrl !== item.processedUrl &&
+              processed.processedUrl !== item.originalUrl
+            ) {
+              URL.revokeObjectURL(processed.processedUrl);
+            }
+            releasePlaybackUrl(processed, item);
+          } else {
+            commitProcessed(item.id, processed);
+          }
+          await delay(10);
         }
-        // Yield between items in batch
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      } finally {
+        endProcessing();
       }
-      setIsProcessing(false);
     },
-    [engineReady, processImage, processVideoItem]
+    [beginProcessing, endProcessing, processImage, processVideoItem, commitProcessed, getItemVersion]
   );
 
-  // Re-process active item when settings or nudge change (with instant fast path).
-  // Reads the latest state from refs so the callback (and everything built on it) stays stable.
+  // Reprocess active item when settings or nudge change. Only the newest
+  // request is allowed to commit, and video jobs are aborted on supersession.
   const reprocessActiveItem = useCallback(
-    async (baseSettings: WatermarkSettings, forcePosition?: ProcessedItem['forcePosition']) => {
-      const activeItem = itemsRef.current.find((i) => i.id === activeIdRef.current);
-      if (!activeItem) return;
+    async (newSettings: WatermarkSettings) => {
+      const item = itemsRef.current.find((current) => current.id === activeIdRef.current);
+      if (!item) return;
 
-      // Manual placement is stored per file: an explicit value wins, otherwise keep the file's own.
-      const fp = forcePosition !== undefined ? forcePosition : activeItem.forcePosition ?? null;
-      const newSettings: WatermarkSettings = { ...baseSettings, forcePosition: fp };
+      const token = ++reprocessToken.current;
+      bumpItemVersion(item.id);
+      beginProcessing();
+      let videoController: AbortController | null = null;
 
-      // Supersede any job still running: abort it and make sure only this one can publish.
-      const jobId = ++jobSeqRef.current;
-      jobAbortRef.current?.abort();
-      const controller = new AbortController();
-      jobAbortRef.current = controller;
-      jobItemIdRef.current = activeItem.id;
-      const isLatest = () => jobId === jobSeqRef.current;
-
-      setIsProcessing(true);
       try {
-        if (activeItem.mediaType === 'video') {
-          const prevProcessedUrl = activeItem.processedUrl;
-          // Show progress instead of a frozen player while the video is re-encoded.
-          setItems((prev) =>
-            prev.map((i) =>
-              i.id === activeItem.id
-                ? { ...i, status: 'processing', videoProgress: { stage: 'demux', ratio: 0 } }
-                : i
-            )
-          );
-          const updated = await processVideoItem(activeItem, newSettings, controller.signal);
-          if (!isLatest()) {
-            if (updated.processedUrl && updated.processedUrl !== prevProcessedUrl) {
+        if (item.mediaType === 'video') {
+          // Supersede only this item's running job. A different item may still
+          // be processing in the batch queue.
+          videoJobsRef.current.get(item.id)?.abort();
+          videoController = new AbortController();
+          videoJobsRef.current.set(item.id, videoController);
+          const updated = await processVideoItem(item, newSettings, videoController.signal);
+
+          if (token !== reprocessToken.current) {
+            // A newer reprocess superseded this one. Release only a newly
+            // created blob, never the currently displayed older result.
+            if (
+              updated.processedUrl &&
+              updated.processedUrl !== item.processedUrl &&
+              updated.processedUrl !== item.originalUrl
+            ) {
               URL.revokeObjectURL(updated.processedUrl);
             }
+            releasePlaybackUrl(updated, item);
             return;
           }
-          if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
-            URL.revokeObjectURL(prevProcessedUrl);
-          }
-          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? { ...updated, forcePosition: fp } : item)));
-        } else if (activeItem.sourceImageData) {
-          // Fast path: Invert directly from cached memory buffer in ~3ms without re-rasterizing
-          try {
-            const { cleanImageData, result } = watermarkEngine.removeWatermark(
-              activeItem.sourceImageData,
-              newSettings
-            );
-            const canvas = document.createElement('canvas');
-            canvas.width = activeItem.sourceImageData.width;
-            canvas.height = activeItem.sourceImageData.height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              ctx.putImageData(cleanImageData, 0, 0);
-              const cleanedBlob = await new Promise<Blob | null>((resolve) =>
-                canvas.toBlob((b) => resolve(b), activeItem.file.type || 'image/png')
-              );
-              const cleanedUrl = cleanedBlob ? URL.createObjectURL(cleanedBlob) : activeItem.originalUrl;
-              if (!isLatest()) {
-                if (cleanedBlob) URL.revokeObjectURL(cleanedUrl);
-                return;
-              }
-              if (activeItem.processedUrl && activeItem.processedUrl.startsWith('blob:')) {
-                URL.revokeObjectURL(activeItem.processedUrl);
-              }
-              const updated: ProcessedItem = {
-                ...activeItem,
-                processedUrl: cleanedUrl,
-                processedImageData: cleanImageData,
-                status: 'done',
-                detectedVersion: result.detectedVersion,
-                result,
-              };
-              setItems((prev) => prev.map((item) => (item.id === activeItem.id ? { ...updated, forcePosition: fp } : item)));
+          if (updated.status === 'done') {
+            const oldUrl = itemsRef.current.find((current) => current.id === item.id)?.processedUrl;
+            if (oldUrl?.startsWith('blob:') && oldUrl !== item.originalUrl) {
+              URL.revokeObjectURL(oldUrl);
             }
-          } catch (err) {
-            console.error('Fast reprocess error:', err);
+            commitProcessed(item.id, updated);
+          } else if (updated.error !== 'Processing cancelled.') {
+            commitProcessed(item.id, updated);
           }
-        } else {
-          const prevProcessedUrl = activeItem.processedUrl;
-          const updated = await processImage(activeItem, newSettings);
-          if (!isLatest()) {
-            if (updated.processedUrl && updated.processedUrl !== prevProcessedUrl) {
-              URL.revokeObjectURL(updated.processedUrl);
-            }
-            return;
-          }
-          if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
-            URL.revokeObjectURL(prevProcessedUrl);
-          }
-          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? { ...updated, forcePosition: fp } : item)));
+          return;
         }
+
+        const updated = await processImage(item, newSettings);
+        if (token !== reprocessToken.current) {
+          if (
+            updated.processedUrl &&
+            updated.processedUrl !== item.processedUrl &&
+            updated.processedUrl !== item.originalUrl
+          ) {
+            URL.revokeObjectURL(updated.processedUrl);
+          }
+          return;
+        }
+        if (updated.status === 'done') {
+          const oldUrl = itemsRef.current.find((current) => current.id === item.id)?.processedUrl;
+          if (oldUrl?.startsWith('blob:') && oldUrl !== item.originalUrl) {
+            URL.revokeObjectURL(oldUrl);
+          }
+        }
+        commitProcessed(item.id, updated);
       } catch (err) {
-        if (!isAbortError(err)) {
+        if (token === reprocessToken.current) {
           console.error('Reprocess error:', err);
-        } else if (jobItemIdRef.current !== activeItem.id) {
-          // The newer job is for another item, so nothing will finish this one: restore it.
           setItems((prev) =>
-            prev.map((i) => (i.id === activeItem.id && i.status === 'processing' ? { ...activeItem } : i))
+            prev.map((current) =>
+              current.id === item.id
+                ? {
+                    ...current,
+                    status: 'error',
+                    videoProgress: undefined,
+                    error: err instanceof Error ? err.message : 'Reprocessing failed',
+                  }
+                : current
+            )
           );
         }
       } finally {
-        if (isLatest()) {
-          setIsProcessing(false);
-          jobItemIdRef.current = '';
+        if (videoController && videoJobsRef.current.get(item.id) === videoController) {
+          videoJobsRef.current.delete(item.id);
         }
+        endProcessing();
       }
     },
-    [processImage, processVideoItem]
+    [beginProcessing, endProcessing, processImage, processVideoItem, commitProcessed, bumpItemVersion]
+  );
+
+  const scheduleReprocess = useCallback(
+    (nextSettings: WatermarkSettings) => {
+      if (reprocessTimer.current) clearTimeout(reprocessTimer.current);
+      const current = itemsRef.current.find((item) => item.id === activeIdRef.current);
+      const wait = current?.mediaType === 'video' ? 300 : 140;
+      reprocessTimer.current = setTimeout(() => {
+        reprocessTimer.current = null;
+        void reprocessActiveItem(nextSettings);
+      }, wait);
+    },
+    [reprocessActiveItem]
   );
 
   const handleUpdateSettings = useCallback(
@@ -422,104 +627,157 @@ export const App: React.FC = () => {
       const updated = { ...settingsRef.current, ...partial };
       settingsRef.current = updated;
       setSettings(updated);
-      void reprocessActiveItem(updated);
+      scheduleReprocess(updated);
     },
-    [reprocessActiveItem]
+    [scheduleReprocess]
   );
 
   const handleResetSettings = useCallback(() => {
     settingsRef.current = DEFAULT_SETTINGS;
     setSettings(DEFAULT_SETTINGS);
-    void reprocessActiveItem(DEFAULT_SETTINGS, null); // also clears this file's manual placement
-  }, [reprocessActiveItem]);
+    scheduleReprocess(DEFAULT_SETTINGS);
+  }, [scheduleReprocess]);
+
+  // Forced coordinates belong to one specific asset. Carrying them across a
+  // selection or a new batch would pin unrelated media to the wrong corner.
+  const clearForcedPosition = useCallback(() => {
+    if (!settingsRef.current.forcePosition) return;
+    const cleared = { ...settingsRef.current, forcePosition: null };
+    settingsRef.current = cleared;
+    setSettings(cleared);
+  }, []);
+
+  const handleSelectItem = useCallback(
+    (id: string) => {
+      if (id === activeIdRef.current) return;
+      // A pending settings debounce belongs to the item that was active when
+      // the change was made, not to the item being selected.
+      if (reprocessTimer.current) {
+        clearTimeout(reprocessTimer.current);
+        reprocessTimer.current = null;
+      }
+      setActiveId(id);
+      clearForcedPosition();
+    },
+    [clearForcedPosition]
+  );
 
   const handleNudge = useCallback(
     (dx: number, dy: number) => {
-      const item = itemsRef.current.find((i) => i.id === activeIdRef.current);
-      // Nothing to move when no watermark was located (e.g. a video returned untouched).
-      if (!item?.result || item.result.size <= 0) return;
-      const base = item.forcePosition ?? { ...item.result.position, size: item.result.size };
-      void reprocessActiveItem(settingsRef.current, {
-        x: base.x + dx,
-        y: base.y + dy,
-        size: base.size ?? item.result.size,
-      });
+      const item = itemsRef.current.find((current) => current.id === activeIdRef.current);
+      if (!item?.result) return;
+
+      // Base the nudge on the pending forced alignment when one exists, so
+      // rapid clicks accumulate instead of all resolving against the stale
+      // detection position.
+      const forced = settingsRef.current.forcePosition;
+      const hasForced =
+        forced && Number.isFinite(forced.x) && Number.isFinite(forced.y);
+      const base = hasForced ? forced : item.result.position;
+      const size = (hasForced && forced.size) || item.result.size;
+
+      const updated = {
+        ...settingsRef.current,
+        forcePosition: {
+          x: base.x + dx,
+          y: base.y + dy,
+          size,
+        },
+      };
+      settingsRef.current = updated;
+      setSettings(updated);
+      scheduleReprocess(updated);
     },
-    [reprocessActiveItem]
+    [scheduleReprocess]
   );
 
+  const handleCancelProcessing = useCallback(() => {
+    cancelRequested.current = true;
+    for (const controller of videoJobsRef.current.values()) controller.abort();
+  }, []);
+
   const handleDownload = useCallback(() => {
-    const item = itemsRef.current.find((i) => i.id === activeIdRef.current);
+    const item = itemsRef.current.find((current) => current.id === activeIdRef.current);
     if (!item?.processedUrl) return;
+    const extension =
+      item.mediaType === 'video' ? 'mp4' : item.outputExtension || 'png';
+    const prefix = item.result?.success === false ? 'original' : 'cleaned';
     const a = document.createElement('a');
     a.href = item.processedUrl;
-    a.download = `cleaned_${item.name}`;
+    a.download = downloadFileName(item.name, extension, prefix);
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   }, []);
 
   const handleDownloadAll = useCallback(() => {
-    itemsRef.current.forEach((item) => {
-      if (item.processedUrl && item.status === 'done') {
-        const a = document.createElement('a');
-        a.href = item.processedUrl;
-        a.download = `cleaned_${item.name}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }
-    });
+    for (const item of itemsRef.current) {
+      if (!item.processedUrl || item.status !== 'done') continue;
+      const extension =
+        item.mediaType === 'video' ? 'mp4' : item.outputExtension || 'png';
+      const prefix = item.result?.success === false ? 'original' : 'cleaned';
+      const a = document.createElement('a');
+      a.href = item.processedUrl;
+      a.download = downloadFileName(item.name, extension, prefix);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
   }, []);
-
-  const handleSelectItem = useCallback((id: string) => setActiveId(id), []);
 
   const handleRemoveItem = useCallback((id: string) => {
-    // Stop any work still running for this file so it doesn't burn CPU or leak its output.
-    itemAbortersRef.current.get(id)?.abort();
-    itemAbortersRef.current.delete(id);
-    if (jobItemIdRef.current === id) {
-      jobAbortRef.current?.abort();
-      jobSeqRef.current++;
-      jobItemIdRef.current = '';
-      setIsProcessing(false);
+    const controller = videoJobsRef.current.get(id);
+    if (controller) {
+      controller.abort();
+      videoJobsRef.current.delete(id);
     }
-    const items = itemsRef.current;
-    const itemToRemove = items.find((item) => item.id === id);
+
+    const itemToRemove = itemsRef.current.find((item) => item.id === id);
     if (itemToRemove) {
-      if (itemToRemove.originalUrl && itemToRemove.originalUrl.startsWith('blob:')) {
+      if (itemToRemove.originalUrl.startsWith('blob:')) {
         URL.revokeObjectURL(itemToRemove.originalUrl);
       }
-      if (itemToRemove.processedUrl && itemToRemove.processedUrl.startsWith('blob:')) {
+      if (itemToRemove.processedUrl?.startsWith('blob:')) {
         URL.revokeObjectURL(itemToRemove.processedUrl);
       }
+      releasePlaybackUrl(itemToRemove);
     }
-    setItems((prev) => prev.filter((item) => item.id !== id));
-    if (activeIdRef.current === id) {
-      const remaining = items.filter((item) => item.id !== id);
-      if (remaining.length > 0) setActiveId(remaining[0].id);
-      else setActiveId('');
+
+    const removingActive = activeIdRef.current === id;
+    if (removingActive && reprocessTimer.current) {
+      clearTimeout(reprocessTimer.current);
+      reprocessTimer.current = null;
     }
-  }, []);
+    const remaining = itemsRef.current.filter((item) => item.id !== id);
+    itemVersions.current.delete(id);
+    setItems(remaining);
+    if (removingActive) {
+      setActiveId(remaining[0]?.id || '');
+      clearForcedPosition();
+    }
+  }, [clearForcedPosition]);
 
   const handleClearAll = useCallback(() => {
-    itemAbortersRef.current.forEach((controller) => controller.abort());
-    itemAbortersRef.current.clear();
-    jobAbortRef.current?.abort();
-    jobSeqRef.current++;
-    jobItemIdRef.current = '';
-    setIsProcessing(false);
-    itemsRef.current.forEach((item) => {
-      if (item.originalUrl && item.originalUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(item.originalUrl);
-      }
-      if (item.processedUrl && item.processedUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(item.processedUrl);
-      }
-    });
+    cancelRequested.current = true;
+    if (reprocessTimer.current) {
+      clearTimeout(reprocessTimer.current);
+      reprocessTimer.current = null;
+    }
+    for (const controller of videoJobsRef.current.values()) controller.abort();
+    videoJobsRef.current.clear();
+    for (const item of itemsRef.current) {
+      if (item.originalUrl.startsWith('blob:')) URL.revokeObjectURL(item.originalUrl);
+      if (item.processedUrl?.startsWith('blob:')) URL.revokeObjectURL(item.processedUrl);
+      releasePlaybackUrl(item);
+    }
     setItems([]);
     setActiveId('');
-  }, []);
+    itemVersions.current.clear();
+    setFileError(null);
+    clearForcedPosition();
+  }, [clearForcedPosition]);
+
+  const processingDisabled = !engineReady || isProcessing;
 
   return (
     <div className="min-h-screen bg-[#f8f9fa] dark:bg-[#0b0c0e] text-zinc-950 dark:text-[#f4f5f6] flex flex-col font-sans selection:bg-zinc-900 selection:text-white dark:selection:bg-white dark:selection:text-black transition-colors">
@@ -531,6 +789,24 @@ export const App: React.FC = () => {
       />
 
       <main className="flex-1 max-w-[1600px] mx-auto px-4 sm:px-6 py-6 w-full flex flex-col gap-5">
+        {fileError && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-lg border border-amber-300/80 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+          >
+            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span className="whitespace-pre-line flex-1">{fileError}</span>
+            <button
+              type="button"
+              onClick={() => setFileError(null)}
+              aria-label="Dismiss message"
+              className="p-0.5 rounded hover:bg-amber-100 dark:hover:bg-amber-500/20 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {items.length === 0 ? (
           /* Studio Empty / Initial Stage */
           <div className="flex flex-col items-center justify-center my-auto py-12 gap-8">
@@ -549,7 +825,7 @@ export const App: React.FC = () => {
             </div>
 
             <div className="w-full max-w-2xl flex flex-col gap-4">
-              <DropZone onFilesSelected={handleFilesSelected} />
+              <DropZone onFilesSelected={handleFilesSelected} disabled={processingDisabled} />
             </div>
 
             {/* Technical Specification Matrix */}
@@ -594,13 +870,16 @@ export const App: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-2 mt-2">
                       <button
-                        onClick={() => reprocessActiveItem(settings)}
-                        className="px-3 py-1.5 rounded-lg bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 text-xs font-medium flex items-center gap-1.5 hover:opacity-90 transition cursor-pointer shadow-xs"
+                        type="button"
+                        onClick={() => void reprocessActiveItem(settingsRef.current)}
+                        disabled={isProcessing}
+                        className="px-3 py-1.5 rounded-lg bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 text-xs font-medium flex items-center gap-1.5 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-xs"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
                         Retry Processing
                       </button>
                       <button
+                        type="button"
                         onClick={() => handleRemoveItem(activeItem.id)}
                         className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-300 text-xs font-medium flex items-center gap-1.5 hover:bg-zinc-100 dark:hover:bg-white/5 transition cursor-pointer shadow-xs"
                       >
@@ -618,7 +897,7 @@ export const App: React.FC = () => {
                         </div>
                       }
                     >
-                      <VideoPlayerComparison item={activeItem} />
+                      <VideoPlayerComparison key={activeItem.id} item={activeItem} />
                     </Suspense>
                   ) : (
                     <div className="h-[480px] rounded-xl border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#0c0d10] flex flex-col items-center justify-center p-8 gap-3 select-none">
@@ -639,10 +918,18 @@ export const App: React.FC = () => {
                           {Math.round((activeItem.videoProgress?.ratio || 0) * 100)}% Completed · Zero Uploads
                         </span>
                       </div>
+                      <button
+                        type="button"
+                        onClick={handleCancelProcessing}
+                        className="mt-1 px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-300 text-xs font-medium hover:bg-zinc-100 dark:hover:bg-white/5 transition cursor-pointer"
+                      >
+                        Cancel Processing
+                      </button>
                     </div>
                   )
                 ) : activeItem?.processedUrl ? (
                   <ComparisonSlider
+                    key={activeItem.id}
                     originalUrl={activeItem.originalUrl}
                     cleanedUrl={activeItem.processedUrl}
                     result={activeItem.result}
@@ -650,8 +937,15 @@ export const App: React.FC = () => {
                     height={activeItem.originalHeight}
                   />
                 ) : (
-                  <div className="h-[480px] rounded-xl border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#0c0d10] flex items-center justify-center">
+                  <div className="h-[480px] rounded-xl border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#0c0d10] flex flex-col items-center justify-center gap-3">
                     <Loader2 className="w-6 h-6 text-zinc-950 dark:text-white animate-spin" />
+                    <button
+                      type="button"
+                      onClick={handleCancelProcessing}
+                      className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-300 text-xs font-medium hover:bg-zinc-100 dark:hover:bg-white/5 transition cursor-pointer"
+                    >
+                      Cancel Processing
+                    </button>
                   </div>
                 )}
 
@@ -670,22 +964,32 @@ export const App: React.FC = () => {
                 <ControlsPanel
                   settings={settings}
                   result={activeItem?.result}
+                  warning={activeItem?.warning}
                   onUpdateSettings={handleUpdateSettings}
                   onResetSettings={handleResetSettings}
                   onDownload={handleDownload}
                   onNudge={handleNudge}
-                  canNudge={Boolean(activeItem?.result && activeItem.result.size > 0)}
+                  onCancel={handleCancelProcessing}
                   isProcessing={isProcessing}
                   fileName={activeItem?.name || 'cleaned_file'}
                   mediaType={activeItem?.mediaType}
-                  hasOutput={Boolean(activeItem?.processedUrl)}
+                  hasOutput={Boolean(activeItem?.processedUrl && activeItem.status === 'done')}
                 />
 
-                <DropZone onFilesSelected={handleFilesSelected} isCompact />
+                <DropZone
+                  onFilesSelected={handleFilesSelected}
+                  isCompact
+                  disabled={processingDisabled}
+                />
               </div>
             </div>
           </div>
         )}
+
+        <footer className="mt-auto pt-6 text-center text-[10px] leading-relaxed text-zinc-500 dark:text-zinc-600 font-mono">
+          Use only on media you own or are authorized to edit. Inverta Studio is an independent
+          project and is not affiliated with or endorsed by Google.
+        </footer>
       </main>
     </div>
   );

@@ -4,6 +4,30 @@ export interface MatchPoint {
   ncc: number;
 }
 
+interface TemplateStats {
+  sum: number;
+  sumSq: number;
+  count: number;
+}
+
+const templateStatsCache = new WeakMap<Float32Array, TemplateStats>();
+
+function getTemplateStats(template: Float32Array): TemplateStats {
+  let stats = templateStatsCache.get(template);
+  if (stats) return stats;
+
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < template.length; i++) {
+    const value = template[i];
+    sum += value;
+    sumSq += value * value;
+  }
+  stats = { sum, sumSq, count: template.length };
+  templateStatsCache.set(template, stats);
+  return stats;
+}
+
 /**
  * Computes Normalized Cross-Correlation (NCC) between the luminance of the
  * image patch at (posX, posY) and the given alphaMap template.
@@ -22,12 +46,13 @@ export function nccAt(
     return -1;
   }
 
-  let sumT = 0;
+  const templateStats = getTemplateStats(template);
+  const count = templateSize * templateSize;
+  if (templateStats.count !== count) return -1;
+
   let sumI = 0;
-  let sumTT = 0;
   let sumII = 0;
   let sumTI = 0;
-  let count = 0;
 
   for (let dy = 0; dy < templateSize; dy++) {
     const rowOffset = (posY + dy) * imgWidth;
@@ -39,21 +64,18 @@ export function nccAt(
       const lum = (0.299 * data[pIdx] + 0.587 * data[pIdx + 1] + 0.114 * data[pIdx + 2]) / 255.0;
       const tVal = template[tRowOffset + dx];
 
-      sumT += tVal;
-      sumTT += tVal * tVal;
       sumI += lum;
       sumII += lum * lum;
       sumTI += tVal * lum;
-      count++;
     }
   }
 
   if (count === 0) return -1;
 
-  const meanT = sumT / count;
+  const meanT = templateStats.sum / count;
   const meanI = sumI / count;
   const covar = sumTI / count - meanT * meanI;
-  const varT = Math.max(0, sumTT / count - meanT * meanT);
+  const varT = Math.max(0, templateStats.sumSq / count - meanT * meanT);
   const varI = Math.max(0, sumII / count - meanI * meanI);
   const stdT = Math.sqrt(varT);
   const stdI = Math.sqrt(varI);

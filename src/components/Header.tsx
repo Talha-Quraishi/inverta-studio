@@ -8,7 +8,7 @@ interface HeaderProps {
   onClearAll?: () => void;
 }
 
-const HeaderImpl: React.FC<HeaderProps> = ({
+export const Header: React.FC<HeaderProps> = ({
   theme,
   onToggleTheme,
   hasItems = false,
@@ -19,7 +19,10 @@ const HeaderImpl: React.FC<HeaderProps> = ({
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
         {/* Brand identity */}
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-zinc-900 dark:bg-white/[0.06] border border-zinc-700 dark:border-white/[0.12] flex items-center justify-center text-white">
+          <div
+            aria-hidden="true"
+            className="w-8 h-8 rounded-lg bg-zinc-900 dark:bg-white/[0.06] border border-zinc-700 dark:border-white/[0.12] flex items-center justify-center text-white"
+          >
             <svg
               className="w-4 h-4 text-white"
               viewBox="0 0 24 24"
@@ -63,25 +66,31 @@ const HeaderImpl: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-2 text-xs">
           {/* Theme Mode Toggle */}
           <button
+            type="button"
             onClick={onToggleTheme}
             title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
             className="flex items-center justify-center w-8 h-8 rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white border border-zinc-200 dark:border-white/[0.06] transition cursor-pointer"
-            aria-label="Toggle Theme"
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           >
             {theme === 'dark' ? (
-              <Sun className="w-3.5 h-3.5 text-amber-400" />
+              <Sun className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
             ) : (
-              <Moon className="w-3.5 h-3.5 text-zinc-700" />
+              <Moon className="w-3.5 h-3.5 text-zinc-700" aria-hidden="true" />
             )}
           </button>
 
           {hasItems && onClearAll && (
             <button
-              onClick={onClearAll}
+              type="button"
+              onClick={() => {
+                if (window.confirm('Remove all files from this session? This cannot be undone.')) {
+                  onClearAll();
+                }
+              }}
               title="Clear all workspace items"
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-zinc-100 hover:bg-red-50 text-zinc-600 hover:text-red-600 dark:bg-white/[0.04] dark:hover:bg-red-500/10 dark:text-zinc-400 dark:hover:text-red-400 border border-zinc-200 hover:border-red-200 dark:border-white/[0.06] dark:hover:border-red-500/20 transition text-[11px] font-mono cursor-pointer"
             >
-              <Trash2 className="w-3 h-3" />
+              <Trash2 className="w-3 h-3" aria-hidden="true" />
               <span>Clear</span>
             </button>
           )}
@@ -90,5 +99,3 @@ const HeaderImpl: React.FC<HeaderProps> = ({
     </header>
   );
 };
-
-export const Header = React.memo(HeaderImpl);

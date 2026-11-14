@@ -1,5 +1,11 @@
-import type { LogoVersion } from './types';
-import { resolveAssetUrl } from '../utils/assetUrl';
+import type { LogoVersion } from './types.ts';
+import { resolveAssetUrl } from '../utils/assetUrl.ts';
+import {
+  inferMaskSize,
+  isValidMask,
+  rescaleAlphaMap,
+  resolveScaledMaskSize,
+} from './maskGeometry.ts';
 
 export interface MaskData {
   alphaMap: Float32Array;
@@ -54,7 +60,11 @@ export class AlphaMaskManager {
 
   public getBaseMap(size: number, version: LogoVersion): Float32Array {
     if (size === 84) {
-      return this.alphaMap84Star || this.alphaMap96 || new Float32Array(84 * 84);
+      // The 84px asset is the classic paired star mask. New/white versions are
+      // derived from their native 48/96px assets by getScaledMask. Never reuse
+      // the 96px buffer here: declaring 96x96 data as 84x84 misaligns every
+      // correlation and removal lookup.
+      return this.alphaMap84Star || new Float32Array(84 * 84);
     }
     const is96 = size === 96;
     if (is96) {
@@ -68,83 +78,26 @@ export class AlphaMaskManager {
     }
   }
 
-  /**
-   * Returns the mask for a watermark of exactly `size` pixels. Sizes without a bundled
-   * template (e.g. 56, 64, 72) are resampled from the nearest template, exactly as the
-   * detector does, so the mask array always has size * size entries.
-   */
-  public getMaskForSize(size: number, version: LogoVersion): MaskData {
-    if (size === 48 || size === 84 || size === 96) {
-      return { alphaMap: this.getBaseMap(size, version), size };
-    }
-    const baseRef = size > 64 ? 96 : version === 'old' ? 84 : 48;
-    return this.getScaledMask(baseRef, size / baseRef, version);
-  }
-
-  /** Resamples an already-sized mask by `scale` (cached). */
-  public rescaleMask(mask: MaskData, scale: number, version: LogoVersion): MaskData {
-    const targetSize = Math.max(4, Math.round(mask.size * (scale || 1.0)));
-    if (targetSize === mask.size) return mask;
-    const cacheKey = `${version}_m${mask.size}_${targetSize}`;
-    const cached = this.scaledCache.get(cacheKey);
-    if (cached) return cached;
-    const result: MaskData = {
-      alphaMap: this.rescaleBilinear(mask.alphaMap, mask.size, targetSize),
-      size: targetSize,
-    };
-    this.scaledCache.set(cacheKey, result);
-    return result;
-  }
-
   public getScaledMask(baseSize: number, scale: number, version: LogoVersion): MaskData {
     const baseMap = this.getBaseMap(baseSize, version);
-    const targetSize = Math.max(4, Math.round(baseSize * (scale || 1.0)));
+    const actualBaseSize = inferMaskSize(baseMap) ?? baseSize;
+    const targetSize = resolveScaledMaskSize(actualBaseSize, scale);
 
-    if (targetSize === baseSize) {
-      return { alphaMap: baseMap, size: baseSize };
+    if (targetSize === actualBaseSize) {
+      return { alphaMap: baseMap, size: actualBaseSize };
     }
 
-    const cacheKey = `${version}_${baseSize}_${targetSize}`;
+    const cacheKey = `${version}_${actualBaseSize}_${targetSize}`;
     const cached = this.scaledCache.get(cacheKey);
     if (cached) return cached;
 
-    const scaled = this.rescaleBilinear(baseMap, baseSize, targetSize);
+    const scaled = rescaleAlphaMap(baseMap, actualBaseSize, targetSize);
     const result: MaskData = { alphaMap: scaled, size: targetSize };
+    if (!isValidMask(result)) {
+      throw new Error(`Mask rescale produced invalid ${targetSize}×${targetSize} data`);
+    }
     this.scaledCache.set(cacheKey, result);
     return result;
-  }
-
-  private rescaleBilinear(src: Float32Array, srcSize: number, dstSize: number): Float32Array {
-    if (srcSize === dstSize) return src;
-    const dst = new Float32Array(dstSize * dstSize);
-    const scaleFactor = (srcSize - 1) / Math.max(1, dstSize - 1);
-
-    for (let dy = 0; dy < dstSize; dy++) {
-      const sy = dy * scaleFactor;
-      const y0 = Math.floor(sy);
-      const y1 = Math.min(srcSize - 1, y0 + 1);
-      const dyFract = sy - y0;
-
-      for (let dx = 0; dx < dstSize; dx++) {
-        const sx = dx * scaleFactor;
-        const x0 = Math.floor(sx);
-        const x1 = Math.min(srcSize - 1, x0 + 1);
-        const dxFract = sx - x0;
-
-        const p00 = src[y0 * srcSize + x0];
-        const p10 = src[y0 * srcSize + x1];
-        const p01 = src[y1 * srcSize + x0];
-        const p11 = src[y1 * srcSize + x1];
-
-        dst[dy * dstSize + dx] =
-          p00 * (1 - dxFract) * (1 - dyFract) +
-          p10 * dxFract * (1 - dyFract) +
-          p01 * (1 - dxFract) * dyFract +
-          p11 * dxFract * dyFract;
-      }
-    }
-
-    return dst;
   }
 
   private calculateAlphaFromAlphaChannel(imgData: ImageData, width: number, height: number): Float32Array {
@@ -174,13 +127,18 @@ export class AlphaMaskManager {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
         const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
+        canvas.width = w;
+        canvas.height = h;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) return reject(new Error('Canvas context unavailable'));
+        if (w !== h || w <= 0) {
+          return reject(new Error(`Mask must be a non-empty square: ${src} is ${w}×${h}`));
+        }
         ctx.drawImage(img, 0, 0);
-        resolve(ctx.getImageData(0, 0, img.width, img.height));
+        resolve(ctx.getImageData(0, 0, w, h));
       };
       img.onerror = () => reject(new Error(`Failed to load mask image: ${src}`));
       img.src = src;

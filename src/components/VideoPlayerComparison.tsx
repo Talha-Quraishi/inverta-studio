@@ -17,7 +17,7 @@ interface VideoPlayerComparisonProps {
   item: ProcessedItem;
 }
 
-const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item }) => {
+export const VideoPlayerComparison: React.FC<VideoPlayerComparisonProps> = ({ item }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [viewMode, setViewMode] = useState<'split' | 'slider' | 'cleaned' | 'original'>('slider');
@@ -35,15 +35,27 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
   const cachedRect = useRef<DOMRect | null>(null);
   const rafId = useRef<number | null>(null);
   const nextPos = useRef<number>(50);
+  const playbackTimeRef = useRef(0);
+  const appliedViewModeRef = useRef(viewMode);
+
+  const cleanedUrl = item.processedUrl || item.originalUrl;
+  // Broken MP4 sync tables make the raw source unseekable in Chromium. The
+  // worker returns a byte-identical playback copy with a corrected stss table.
+  const originalUrl = item.playbackUrl || item.originalUrl;
+  const fps = item.fps && item.fps > 0 ? item.fps : 30;
 
   // Read video resolution from metadata
   const handleLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     const v = e.currentTarget;
     if (v.videoWidth && v.videoHeight) {
-      setVideoDims({ width: v.videoWidth, height: v.videoHeight });
+      setVideoDims((prev) =>
+        prev.width === v.videoWidth && prev.height === v.videoHeight
+          ? prev
+          : { width: v.videoWidth, height: v.videoHeight }
+      );
     }
-    if (v.duration) {
-      setDuration(v.duration);
+    if (Number.isFinite(v.duration) && v.duration > 0) {
+      setDuration((prev) => (Math.abs(prev - v.duration) < 0.01 ? prev : v.duration));
     }
   };
 
@@ -57,13 +69,26 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
       ? `${videoDims.width}×${videoDims.height} · 1:1 Square`
       : `${videoDims.width}×${videoDims.height} · 16:9 Widescreen`;
 
-  // Exact watermark focal coordinates from detection telemetry
-  const wmOriginX = item.result && videoDims.width > 0
-    ? Math.round(((item.result.position.x + item.result.size / 2) / videoDims.width) * 100)
+  // Watermark focal coordinates from detection telemetry, clamped so an edge
+  // watermark cannot transform the loupe outside the visible stage.
+  const hasDetection = item.result?.success === true;
+  const wmOriginX = hasDetection && item.result && videoDims.width > 0
+    ? Math.max(0, Math.min(100, Math.round(((item.result.position.x + item.result.size / 2) / videoDims.width) * 100)))
     : (isPortrait ? 84 : 90);
-  const wmOriginY = item.result && videoDims.height > 0
-    ? Math.round(((item.result.position.y + item.result.size / 2) / videoDims.height) * 100)
+  const wmOriginY = hasDetection && item.result && videoDims.height > 0
+    ? Math.max(0, Math.min(100, Math.round(((item.result.position.y + item.result.size / 2) / videoDims.height) * 100)))
     : (isPortrait ? 91 : 86);
+
+  // Only one element may own the audio output. Playing both unmuted created an
+  // audible echo because the two tracks were never sample-aligned.
+  const audioOwner: 'original' | 'cleaned' = viewMode === 'cleaned' ? 'cleaned' : 'original';
+  const originalMuted = isMuted || audioOwner !== 'original';
+  const cleanedMuted = isMuted || audioOwner !== 'cleaned';
+
+  useEffect(() => {
+    if (originalVideoRef.current) originalVideoRef.current.muted = originalMuted;
+    if (cleanedVideoRef.current) cleanedVideoRef.current.muted = cleanedMuted;
+  }, [originalMuted, cleanedMuted]);
 
   // Synchronized play / pause
   const togglePlay = useCallback(() => {
@@ -89,7 +114,9 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
     const clean = cleanedVideoRef.current;
     if (orig) {
       setCurrentTime(orig.currentTime);
-      if (orig.duration && !duration) setDuration(orig.duration);
+      if (Number.isFinite(orig.duration) && orig.duration > 0) {
+        setDuration((prev) => (Math.abs(prev - orig.duration) < 0.01 ? prev : orig.duration));
+      }
 
       // Active drift correction: keep cleaned video aligned to master original video within 40ms
       if (clean && !clean.seeking && !orig.seeking) {
@@ -100,7 +127,9 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
       }
     } else if (clean) {
       setCurrentTime(clean.currentTime);
-      if (clean.duration && !duration) setDuration(clean.duration);
+      if (Number.isFinite(clean.duration) && clean.duration > 0) {
+        setDuration((prev) => (Math.abs(prev - clean.duration) < 0.01 ? prev : clean.duration));
+      }
     }
   };
 
@@ -112,14 +141,14 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
   };
 
   const stepFrame = useCallback((frames: number) => {
-    const frameDuration = 1 / (item.videoFps && item.videoFps > 0 ? item.videoFps : 30);
     const v = cleanedVideoRef.current || originalVideoRef.current;
     if (!v) return;
+    const frameDuration = 1 / fps;
     const newTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + frames * frameDuration));
     if (cleanedVideoRef.current) cleanedVideoRef.current.currentTime = newTime;
     if (originalVideoRef.current) originalVideoRef.current.currentTime = newTime;
     setCurrentTime(newTime);
-  }, [item.videoFps]);
+  }, [fps]);
 
   const handleRestart = useCallback(() => {
     if (cleanedVideoRef.current) cleanedVideoRef.current.currentTime = 0;
@@ -128,12 +157,7 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
   }, []);
 
   const toggleMute = useCallback(() => {
-    setIsMuted((prev) => {
-      const next = !prev;
-      if (cleanedVideoRef.current) cleanedVideoRef.current.muted = next;
-      if (originalVideoRef.current) originalVideoRef.current.muted = next;
-      return next;
-    });
+    setIsMuted((prev) => !prev);
   }, []);
 
   // Toggle Corner Loupe with automatic watermark divider alignment
@@ -170,15 +194,97 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
     }
   }, []);
 
+  const endSliderDrag = useCallback(() => {
+    isDraggingSlider.current = false;
+    cachedRect.current = null;
+    if (rafId.current !== null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+    };
+  }, []);
+
+  // Keep playback state honest if the browser pauses media on its own.
+  useEffect(() => {
+    const videos = [originalVideoRef.current, cleanedVideoRef.current].filter(
+      (v): v is HTMLVideoElement => Boolean(v)
+    );
+    const onPause = () => {
+      if (videos.every((v) => v.paused)) setIsPlaying(false);
+    };
+    const onPlay = () => setIsPlaying(true);
+    for (const v of videos) {
+      v.addEventListener('pause', onPause);
+      v.addEventListener('play', onPlay);
+    }
+    return () => {
+      for (const v of videos) {
+        v.removeEventListener('pause', onPause);
+        v.removeEventListener('play', onPlay);
+      }
+    };
+    // Switching view modes replaces the <video> nodes, so the listeners must
+    // be reattached even though the effect body only reads refs.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+  }, [viewMode]);
+
+  // Track the timeline outside render so a view-mode switch can restore the
+  // newly mounted <video> node to the same seek position.
+  useEffect(() => {
+    playbackTimeRef.current = currentTime;
+  }, [currentTime]);
+
+  // Changing the view mode replaces the <video> elements. Seek the new nodes
+  // back to the current time; playback itself is reset in `selectViewMode` so
+  // the Pause button can never describe a fresh, paused video as playing.
+  useEffect(() => {
+    const previousViewMode = appliedViewModeRef.current;
+    appliedViewModeRef.current = viewMode;
+    if (previousViewMode === viewMode) return;
+
+    const time = playbackTimeRef.current;
+    const videos = [originalVideoRef.current, cleanedVideoRef.current].filter(
+      (v): v is HTMLVideoElement => Boolean(v)
+    );
+
+    for (const video of videos) {
+      if (time > 0) {
+        try {
+          video.currentTime =
+            Number.isFinite(video.duration) && video.duration > 0
+              ? Math.min(time, video.duration)
+              : time;
+        } catch {
+          // Metadata may not be available yet; the pending seek is retained.
+        }
+      }
+    }
+  }, [viewMode]);
+
+  const selectViewMode = useCallback(
+    (mode: typeof viewMode) => {
+      if (mode === viewMode) return;
+      setIsPlaying(false);
+      setViewMode(mode);
+    },
+    [viewMode]
+  );
+
   const handlePointerDown = (e: React.PointerEvent) => {
-    if (e.button === 0) {
-      isDraggingSlider.current = true;
-      const target = videoWrapperRef.current || containerRef.current;
-      if (target) cachedRect.current = target.getBoundingClientRect();
-      handleSliderMove(e.clientX);
-      try {
-        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-      } catch {}
+    if (viewMode !== 'slider' || e.button !== 0) return;
+    isDraggingSlider.current = true;
+    const target = videoWrapperRef.current || containerRef.current;
+    if (target) cachedRect.current = target.getBoundingClientRect();
+    handleSliderMove(e.clientX);
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // Capture is a progressive enhancement.
     }
   };
 
@@ -188,112 +294,73 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
     }
   };
 
-  const handlePointerUp = (e: React.PointerEvent) => {
-    isDraggingSlider.current = false;
-    cachedRect.current = null;
-    if (rafId.current !== null) {
-      cancelAnimationFrame(rafId.current);
-      rafId.current = null;
-    }
+  const handlePointerEnd = (e: React.PointerEvent) => {
+    endSliderDrag();
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {}
+    } catch {
+      // Capture may already have been released.
+    }
   };
 
-  // Global window listeners for uninterrupted drag tracking
-  useEffect(() => {
-    const onMove = (e: MouseEvent | PointerEvent) => {
-      if (isDraggingSlider.current) {
-        handleSliderMove(e.clientX);
-      }
-    };
-    const onUp = () => {
-      isDraggingSlider.current = false;
-      cachedRect.current = null;
-      if (rafId.current !== null) {
-        cancelAnimationFrame(rafId.current);
-        rafId.current = null;
-      }
-    };
-    window.addEventListener('pointermove', onMove, { passive: true });
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('mousemove', onMove, { passive: true });
-    window.addEventListener('mouseup', onUp);
-    const onTouchMove = (e: TouchEvent) => {
-      if (isDraggingSlider.current && e.touches[0]) {
-        handleSliderMove(e.touches[0].clientX);
-      }
-    };
-    window.addEventListener('touchmove', onTouchMove, { passive: true });
-    window.addEventListener('touchend', onUp);
+  // Keyboard shortcuts are scoped to the focused player, so typing elsewhere
+  // is never interrupted.
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-    return () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onUp);
-      if (rafId.current !== null) {
-        cancelAnimationFrame(rafId.current);
-      }
-    };
-  }, [handleSliderMove]);
-
-  // Video keyboard ergonomics
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Never hijack browser/OS shortcuts (Ctrl+R, Cmd+Z, ...) or typing in form fields.
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        e.target instanceof HTMLSelectElement ||
-        (e.target instanceof HTMLElement && e.target.isContentEditable)
-      ) {
-        return;
-      }
-
-      if (e.code === 'Space') {
+    switch (e.key) {
+      case ' ':
+      case 'Spacebar':
         e.preventDefault();
         togglePlay();
-      } else if (e.key === 'ArrowLeft') {
+        break;
+      case 'ArrowLeft':
         e.preventDefault();
         if (viewMode === 'slider' && !isPlaying) {
           setSliderPos((p) => Math.max(0, p - (e.shiftKey ? 5 : 1)));
         } else {
           stepFrame(e.shiftKey ? -5 : -1);
         }
-      } else if (e.key === 'ArrowRight') {
+        break;
+      case 'ArrowRight':
         e.preventDefault();
         if (viewMode === 'slider' && !isPlaying) {
           setSliderPos((p) => Math.min(100, p + (e.shiftKey ? 5 : 1)));
         } else {
           stepFrame(e.shiftKey ? 5 : 1);
         }
-      } else if (e.key.toLowerCase() === 'm') {
+        break;
+      case 'm':
+      case 'M':
         e.preventDefault();
         toggleMute();
-      } else if (e.key.toLowerCase() === 'r') {
+        break;
+      case 'r':
+      case 'R':
         e.preventDefault();
         handleRestart();
-      } else if (e.key.toLowerCase() === 'z') {
+        break;
+      case 'z':
+      case 'Z':
         e.preventDefault();
         toggleCornerLoupe();
-      } else if (e.key === '1') {
-        setViewMode('slider');
-      } else if (e.key === '2') {
-        setViewMode('split');
-      } else if (e.key === '3') {
-        setViewMode('cleaned');
-      } else if (e.key === '4') {
-        setViewMode('original');
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, stepFrame, toggleMute, handleRestart, toggleCornerLoupe, viewMode, isPlaying]);
+        break;
+      case '1':
+        selectViewMode('slider');
+        break;
+      case '2':
+        selectViewMode('split');
+        break;
+      case '3':
+        selectViewMode('cleaned');
+        break;
+      case '4':
+        selectViewMode('original');
+        break;
+      default:
+        break;
+    }
+  };
 
   const formatTimecode = (sec: number) => {
     const m = Math.floor(sec / 60);
@@ -307,6 +374,13 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
       ? { aspectRatio: `${videoDims.width} / ${videoDims.height}` }
       : undefined;
 
+  const viewButtonClass = (mode: typeof viewMode) =>
+    `px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
+      viewMode === mode
+        ? 'bg-white text-zinc-950 font-semibold shadow-xs border border-zinc-300 dark:bg-white/[0.12] dark:text-white dark:border-white/[0.12]'
+        : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200'
+    }`;
+
   return (
     <div className="flex flex-col gap-3 bg-white dark:bg-[#111316] border border-zinc-200/90 dark:border-white/[0.08] rounded-xl p-3 sm:p-4 select-none shadow-sm transition-colors">
       {/* Top View Mode Switcher and Dimension Telemetry */}
@@ -315,6 +389,9 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
           <span className="font-semibold text-zinc-950 dark:text-white tracking-tight text-xs uppercase">Video Viewport</span>
           <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
             {aspectLabel}
+          </span>
+          <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
+            {fps} fps
           </span>
           {item.detectedVersion && (
             <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
@@ -326,7 +403,10 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
         <div className="flex items-center gap-1.5">
           {/* Zoom Loupe Toggle */}
           <button
+            type="button"
             onClick={toggleCornerLoupe}
+            aria-pressed={zoomCorner}
+            aria-label={zoomCorner ? 'Reset view to fit' : 'Inspect watermark corner at 2.2x'}
             title={zoomCorner ? 'Reset View to 1:1' : 'Inspect Watermark Corner (2.2x)'}
             className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono border transition cursor-pointer ${
               zoomCorner
@@ -339,46 +419,46 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
           </button>
 
           {/* View Mode Segmented Controls */}
-          <div className="flex items-center gap-0.5 bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06] rounded-md p-0.5">
+          <div
+            role="group"
+            aria-label="Video view mode"
+            className="flex items-center gap-0.5 bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06] rounded-md p-0.5"
+          >
             <button
-              onClick={() => setViewMode('slider')}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
-                viewMode === 'slider'
-                  ? 'bg-white text-zinc-950 font-semibold shadow-xs border border-zinc-300 dark:bg-white/[0.12] dark:text-white dark:border-white/[0.12]'
-                  : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200'
-              }`}
+              type="button"
+              onClick={() => selectViewMode('slider')}
+              aria-pressed={viewMode === 'slider'}
+              title="Swipe comparison (1)"
+              className={viewButtonClass('slider')}
             >
               <SlidersHorizontal className="w-3 h-3" />
               <span className="hidden sm:inline">Swipe</span>
             </button>
             <button
-              onClick={() => setViewMode('split')}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
-                viewMode === 'split'
-                  ? 'bg-white text-zinc-950 font-semibold shadow-xs border border-zinc-300 dark:bg-white/[0.12] dark:text-white dark:border-white/[0.12]'
-                  : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200'
-              }`}
+              type="button"
+              onClick={() => selectViewMode('split')}
+              aria-pressed={viewMode === 'split'}
+              title="Side-by-side (2)"
+              className={viewButtonClass('split')}
             >
               <Columns2 className="w-3 h-3" />
               <span className="hidden sm:inline">Split</span>
             </button>
             <button
-              onClick={() => setViewMode('cleaned')}
-              className={`px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
-                viewMode === 'cleaned'
-                  ? 'bg-white text-zinc-950 font-semibold shadow-xs border border-zinc-300 dark:bg-white/[0.12] dark:text-white dark:border-white/[0.12]'
-                  : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200'
-              }`}
+              type="button"
+              onClick={() => selectViewMode('cleaned')}
+              aria-pressed={viewMode === 'cleaned'}
+              title="Cleaned output only (3)"
+              className={viewButtonClass('cleaned')}
             >
               Cleaned
             </button>
             <button
-              onClick={() => setViewMode('original')}
-              className={`px-2 py-1 rounded text-[11px] font-mono transition cursor-pointer ${
-                viewMode === 'original'
-                  ? 'bg-white text-zinc-950 font-semibold shadow-xs border border-zinc-300 dark:bg-white/[0.12] dark:text-white dark:border-white/[0.12]'
-                  : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200'
-              }`}
+              type="button"
+              onClick={() => selectViewMode('original')}
+              aria-pressed={viewMode === 'original'}
+              title="Original reference only (4)"
+              className={viewButtonClass('original')}
             >
               Original
             </button>
@@ -386,13 +466,29 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
         </div>
       </div>
 
+      {item.warning && (
+        <div
+          role="status"
+          className="rounded-lg border border-amber-300/80 bg-amber-50 px-2.5 py-2 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          {item.warning}
+        </div>
+      )}
+
       {/* Screen Canvas Container */}
       <div
         ref={containerRef}
-        onPointerDown={viewMode === 'slider' ? handlePointerDown : undefined}
-        onPointerMove={viewMode === 'slider' ? handlePointerMove : undefined}
-        onPointerUp={viewMode === 'slider' ? handlePointerUp : undefined}
-        className={`relative w-full rounded-lg overflow-hidden bg-[#07080a] border border-white/[0.06] flex items-center justify-center ${
+        tabIndex={0}
+        role="group"
+        aria-label="Video comparison player. Space plays or pauses, arrow keys step or move the split, M mutes, R restarts, Z toggles the loupe, and 1-4 change the view."
+        aria-keyshortcuts="Space ArrowLeft ArrowRight M R Z 1 2 3 4"
+        onKeyDown={handleKeyDown}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
+        onLostPointerCapture={endSliderDrag}
+        className={`relative w-full rounded-lg overflow-hidden bg-[#07080a] border border-white/[0.06] flex items-center justify-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900 dark:focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[#111316] ${
           viewMode === 'slider' ? 'cursor-ew-resize' : 'cursor-default'
         } ${isPortrait ? 'h-[520px] sm:h-[600px] max-h-[72vh]' : 'h-[440px] sm:h-[500px] max-h-[65vh]'}`}
       >
@@ -412,10 +508,11 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
               {/* Base: Cleaned Video */}
               <video
                 ref={cleanedVideoRef}
-                src={item.processedUrl}
+                src={cleanedUrl}
                 playsInline
                 loop
-                muted={isMuted}
+                muted={cleanedMuted}
+                aria-hidden="true"
                 onLoadedMetadata={handleLoadedMetadata}
                 className="w-full h-full object-contain rounded pointer-events-none select-none"
               />
@@ -429,10 +526,11 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
               >
                 <video
                   ref={originalVideoRef}
-                  src={item.originalUrl}
+                  src={originalUrl}
                   playsInline
                   loop
-                  muted={isMuted}
+                  muted={originalMuted}
+                  aria-hidden="true"
                   onLoadedMetadata={handleLoadedMetadata}
                   onTimeUpdate={handleTimeUpdate}
                   className="w-full h-full object-contain rounded pointer-events-none select-none"
@@ -445,7 +543,8 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
                 style={{ left: `${sliderPos}%` }}
               >
                 <div
-                  className="absolute top-1/2 -translate-y-1/2 -left-3.5 w-7 h-7 rounded-full bg-white text-zinc-950 border border-black/20 shadow-lg flex items-center justify-center active:scale-105 transition-transform pointer-events-auto cursor-ew-resize"
+                  aria-hidden="true"
+                  className="absolute top-1/2 -translate-y-1/2 -left-3.5 w-7 h-7 rounded-full bg-white text-zinc-950 border border-black/20 shadow-lg flex items-center justify-center active:scale-105 transition-transform pointer-events-none cursor-ew-resize"
                 >
                   <div className="flex gap-0.5">
                     <span className="w-0.5 h-2.5 bg-zinc-800 rounded-full" />
@@ -481,10 +580,11 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
               >
                 <video
                   ref={originalVideoRef}
-                  src={item.originalUrl}
+                  src={originalUrl}
                   playsInline
                   loop
-                  muted={isMuted}
+                  muted={originalMuted}
+                  aria-hidden="true"
                   onLoadedMetadata={handleLoadedMetadata}
                   onTimeUpdate={handleTimeUpdate}
                   className="w-full h-full object-contain rounded pointer-events-none select-none"
@@ -508,10 +608,11 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
               >
                 <video
                   ref={cleanedVideoRef}
-                  src={item.processedUrl}
+                  src={cleanedUrl}
                   playsInline
                   loop
-                  muted={isMuted}
+                  muted={cleanedMuted}
+                  aria-hidden="true"
                   onLoadedMetadata={handleLoadedMetadata}
                   className="w-full h-full object-contain rounded pointer-events-none select-none"
                 />
@@ -537,11 +638,13 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             >
               <video
                 ref={cleanedVideoRef}
-                src={item.processedUrl}
+                src={cleanedUrl}
                 playsInline
                 loop
-                muted={isMuted}
+                muted={cleanedMuted}
+                aria-hidden="true"
                 onLoadedMetadata={handleLoadedMetadata}
+                onTimeUpdate={handleTimeUpdate}
                 className="w-full h-full object-contain rounded pointer-events-none select-none"
               />
             </div>
@@ -565,10 +668,11 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             >
               <video
                 ref={originalVideoRef}
-                src={item.originalUrl}
+                src={originalUrl}
                 playsInline
                 loop
-                muted={isMuted}
+                muted={originalMuted}
+                aria-hidden="true"
                 onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
                 className="w-full h-full object-contain rounded pointer-events-none select-none"
@@ -595,6 +699,7 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             step="0.01"
             value={currentTime}
             onChange={handleSeek}
+            aria-label="Video timeline"
             style={{
               '--slider-pct': `${duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0}%`,
             } as React.CSSProperties}
@@ -606,10 +711,12 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
         </div>
 
         {/* Control Buttons */}
-        <div className="flex items-center justify-between text-xs pt-1">
+        <div className="flex items-center justify-between gap-2 text-xs pt-1">
           <div className="flex items-center gap-1.5">
             <button
+              type="button"
               onClick={togglePlay}
+              aria-label={isPlaying ? 'Pause video' : 'Play video'}
               className="w-8 h-8 rounded-md bg-zinc-950 hover:bg-zinc-800 text-white dark:bg-white dark:hover:bg-zinc-200 dark:text-zinc-950 flex items-center justify-center transition active:scale-95 cursor-pointer shadow-xs"
               title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             >
@@ -617,7 +724,9 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             </button>
 
             <button
+              type="button"
               onClick={() => stepFrame(-1)}
+              aria-label="Step backward one frame"
               className="w-7 h-7 rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white border border-zinc-200 dark:border-white/[0.06] flex items-center justify-center transition cursor-pointer"
               title="Step Backward 1 Frame"
             >
@@ -625,7 +734,9 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             </button>
 
             <button
+              type="button"
               onClick={() => stepFrame(1)}
+              aria-label="Step forward one frame"
               className="w-7 h-7 rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white border border-zinc-200 dark:border-white/[0.06] flex items-center justify-center transition cursor-pointer"
               title="Step Forward 1 Frame"
             >
@@ -633,7 +744,9 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             </button>
 
             <button
+              type="button"
               onClick={handleRestart}
+              aria-label="Restart video"
               className="w-7 h-7 rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white border border-zinc-200 dark:border-white/[0.06] flex items-center justify-center transition cursor-pointer"
               title="Restart from Beginning"
             >
@@ -641,7 +754,10 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             </button>
 
             <button
+              type="button"
               onClick={toggleMute}
+              aria-pressed={!isMuted}
+              aria-label={isMuted ? 'Unmute audio' : 'Mute audio'}
               className="w-7 h-7 rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white border border-zinc-200 dark:border-white/[0.06] flex items-center justify-center transition cursor-pointer"
               title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
             >
@@ -649,7 +765,7 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
             </button>
           </div>
 
-          <span className="text-[11px] font-mono text-zinc-500 truncate max-w-[200px]">
+          <span className="text-[11px] font-mono text-zinc-500 truncate max-w-[200px]" title={item.name}>
             {item.name}
           </span>
         </div>
@@ -657,5 +773,3 @@ const VideoPlayerComparisonImpl: React.FC<VideoPlayerComparisonProps> = ({ item 
     </div>
   );
 };
-
-export const VideoPlayerComparison = React.memo(VideoPlayerComparisonImpl);

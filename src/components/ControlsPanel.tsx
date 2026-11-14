@@ -9,38 +9,39 @@ import {
   ArrowRight,
   Crosshair,
   Compass,
+  StopCircle,
 } from 'lucide-react';
 import type { LogoVersion, RemovalResult, WatermarkCorner, WatermarkSettings } from '../engine/types';
 
 interface ControlsPanelProps {
   settings: WatermarkSettings;
   result?: RemovalResult;
+  warning?: string;
   onUpdateSettings: (newSettings: Partial<WatermarkSettings>) => void;
   onResetSettings: () => void;
   onDownload: () => void;
   onNudge: (dx: number, dy: number) => void;
-  /** False when no watermark location exists to move (e.g. nothing detected in a video). */
-  canNudge?: boolean;
+  onCancel?: () => void;
   isProcessing: boolean;
   fileName: string;
   mediaType?: 'image' | 'video';
   hasOutput?: boolean;
 }
 
-const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
+export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   settings,
   result,
+  warning,
   onUpdateSettings,
   onResetSettings,
   onDownload,
   onNudge,
-  canNudge = true,
+  onCancel,
   isProcessing,
   fileName,
   mediaType = 'image',
   hasOutput = false,
 }) => {
-  const nudgeDisabled = !canNudge || isProcessing;
   const [showAdvanced, setShowAdvanced] = useState(true);
   const [localMaskScale, setLocalMaskScale] = useState(settings.maskScale);
   const [localFillRadius, setLocalFillRadius] = useState(settings.fillRadius);
@@ -48,7 +49,10 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
     maskScale: settings.maskScale,
     fillRadius: settings.fillRadius,
   });
-  const debounceTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Separate timers: a shared timer would drop a pending mask-scale update as
+  // soon as the user adjusted the fill radius (and vice versa).
+  const maskTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fillTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Synchronize local slider values if external settings reset/update
   if (prevSettings.maskScale !== settings.maskScale || prevSettings.fillRadius !== settings.fillRadius) {
@@ -62,22 +66,23 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
 
   React.useEffect(() => {
     return () => {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      if (maskTimer.current) clearTimeout(maskTimer.current);
+      if (fillTimer.current) clearTimeout(fillTimer.current);
     };
   }, []);
 
   const handleMaskScaleChange = (val: number) => {
     setLocalMaskScale(val);
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(() => {
+    if (maskTimer.current) clearTimeout(maskTimer.current);
+    maskTimer.current = setTimeout(() => {
       onUpdateSettings({ maskScale: val });
     }, 120);
   };
 
   const handleFillRadiusChange = (val: number) => {
     setLocalFillRadius(val);
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(() => {
+    if (fillTimer.current) clearTimeout(fillTimer.current);
+    fillTimer.current = setTimeout(() => {
       onUpdateSettings({
         fillRadius: val,
         fillMode: val > 0 ? 'on' : 'off',
@@ -85,7 +90,23 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
     }, 120);
   };
 
-  const canDownload = mediaType === 'video' ? hasOutput : (result?.success ?? false);
+  const handleResetDefaults = () => {
+    // Cancel pending debounced updates so a stale slider value cannot be
+    // applied after the reset.
+    if (maskTimer.current) clearTimeout(maskTimer.current);
+    if (fillTimer.current) clearTimeout(fillTimer.current);
+    onResetSettings();
+  };
+
+  const canDownload = hasOutput;
+  const hasDetection = result?.success === true;
+  const exportLabel = !hasDetection
+    ? mediaType === 'video'
+      ? 'Export Original Video (MP4)'
+      : 'Export Original Image'
+    : mediaType === 'video'
+      ? 'Export Cleaned Video (MP4)'
+      : 'Export Cleaned Image';
 
   const formatVersionLabel = (v?: 'old' | 'new' | 'white', size?: number) => {
     const sizeStr = size ? ` (${size}px)` : '';
@@ -109,27 +130,58 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
       </div>
 
       {/* Primary Action Button */}
-      <div>
+      <div className="flex items-center gap-1.5">
         <button
+          type="button"
           onClick={onDownload}
           disabled={!canDownload || isProcessing}
-          className="w-full py-2.5 px-3 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white dark:bg-white dark:hover:bg-zinc-200 dark:text-zinc-950 disabled:bg-zinc-200 disabled:text-zinc-400 dark:disabled:bg-white/[0.05] dark:disabled:text-zinc-600 disabled:cursor-not-allowed font-semibold text-xs tracking-tight transition-all active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+          className="flex-1 py-2.5 px-3 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white dark:bg-white dark:hover:bg-zinc-200 dark:text-zinc-950 disabled:bg-zinc-200 disabled:text-zinc-400 dark:disabled:bg-white/[0.05] dark:disabled:text-zinc-600 disabled:cursor-not-allowed font-semibold text-xs tracking-tight transition-all active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer shadow-sm"
         >
           <Download className="w-3.5 h-3.5" />
-          <span>{mediaType === 'video' ? 'Export Cleaned Video (MP4)' : 'Export Cleaned Image'}</span>
+          <span>{exportLabel}</span>
         </button>
+        {isProcessing && onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            title="Cancel processing"
+            aria-label="Cancel processing"
+            className="p-2.5 rounded-lg border border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-white/5 transition cursor-pointer"
+          >
+            <StopCircle className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
+
+      {warning && (
+        <div
+          role="status"
+          className="rounded-lg border border-amber-300/80 bg-amber-50 px-2.5 py-2 text-[11px] leading-relaxed text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          {warning}
+        </div>
+      )}
 
       {/* Diagnostics HUD */}
       {result && (
         <div className="rounded-lg bg-zinc-50 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06] p-3 flex flex-col gap-2.5">
+          {!hasDetection && (
+            <div
+              role="status"
+              className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[10px] leading-relaxed text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300"
+            >
+              {result.message} Source pixels were preserved; use Position Alignment to force a
+              region if needed.
+            </div>
+          )}
+
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-zinc-500 font-mono">WATERMARK</span>
+            <span className="text-zinc-500 font-mono">{hasDetection ? 'WATERMARK' : 'DETECTION'}</span>
             <div className="flex items-center gap-1.5">
               <span className="font-mono text-zinc-950 dark:text-white text-xs font-medium">
-                {formatVersionLabel(result.detectedVersion, result.size)}
+                {hasDetection ? formatVersionLabel(result.detectedVersion, result.size) : 'None'}
               </span>
-              {settings.logoVersion === 'auto' && (
+              {hasDetection && settings.logoVersion === 'auto' && (
                 <span className="text-[9px] font-mono uppercase px-1 py-0.2 rounded bg-zinc-200 dark:bg-white/[0.08] text-zinc-800 dark:text-zinc-300 border border-zinc-300 dark:border-white/[0.08]">
                   Auto
                 </span>
@@ -138,11 +190,11 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
           </div>
 
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-zinc-500 font-mono">CONFIDENCE</span>
+            <span className="text-zinc-500 font-mono">{hasDetection ? 'CONFIDENCE' : 'BEST NCC'}</span>
             <div className="flex items-center gap-2">
               <div className="w-16 h-1 bg-zinc-200 dark:bg-white/[0.08] rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-zinc-900 dark:bg-white rounded-full transition-all duration-200"
+                  className={`h-full rounded-full transition-all duration-200 ${hasDetection ? 'bg-zinc-900 dark:bg-white' : 'bg-amber-500'}`}
                   style={{ width: `${Math.round(result.confidence * 100)}%` }}
                 />
               </div>
@@ -153,7 +205,7 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
           </div>
 
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-zinc-500 font-mono">POSITION</span>
+            <span className="text-zinc-500 font-mono">{hasDetection ? 'POSITION' : 'BEST CANDIDATE'}</span>
             <span className="font-mono text-zinc-700 dark:text-zinc-300 text-xs">
               {result.position.x}, {result.position.y} ({result.size}×{result.size})
             </span>
@@ -168,14 +220,22 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
 
           <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-zinc-200/80 dark:border-white/[0.04]">
             <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block animate-pulse" />
-              <span className="text-zinc-500 font-mono">SYNTHID</span>
+              <span className={`w-1.5 h-1.5 rounded-full inline-block ${hasDetection ? 'bg-blue-500 animate-pulse' : 'bg-zinc-400 dark:bg-zinc-500'}`} />
+              <span className="text-zinc-500 font-mono">{hasDetection ? 'SYNTHID' : 'PIXELS'}</span>
             </div>
             <span
-              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-200/60 dark:border-blue-500/20"
-              title="Visible 4-point overlay mathematically inverted. Imperceptible frequency-domain latent steganography remains intact."
+              className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                hasDetection
+                  ? 'bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-200/60 dark:border-blue-500/20'
+                  : 'bg-zinc-100 dark:bg-white/[0.04] text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-white/[0.06]'
+              }`}
+              title={
+                hasDetection
+                  ? 'Visible 4-point overlay mathematically inverted. Imperceptible frequency-domain latent steganography remains intact.'
+                  : 'No watermark was found, so the output is a preserve of the source pixels.'
+              }
             >
-              Overlay Clean · Latent Intact
+              {hasDetection ? 'Overlay Clean · Latent Intact' : 'Source Preserved · No Edits'}
             </span>
           </div>
         </div>
@@ -194,7 +254,11 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
             </span>
           )}
         </div>
-        <div className="grid grid-cols-5 gap-1 p-0.5 rounded-lg bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06]">
+        <div
+          role="group"
+          aria-label="Watermark search quadrant"
+          className="grid grid-cols-5 gap-1 p-0.5 rounded-lg bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06]"
+        >
           {[
             { id: 'auto', label: 'Auto' },
             { id: 'bottom-right', label: '↘ BR' },
@@ -206,6 +270,8 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
             return (
               <button
                 key={c.id}
+                type="button"
+                aria-pressed={isActive}
                 onClick={() => onUpdateSettings({ corner: c.id as WatermarkCorner })}
                 title={c.id === 'auto' ? 'Auto 4-Corner Search' : c.label}
                 className={`py-1.5 px-0.5 rounded-md text-[11px] font-mono text-center transition-colors cursor-pointer ${
@@ -225,18 +291,24 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between text-[11px]">
           <span className="text-zinc-700 dark:text-zinc-400 font-medium">Watermark Template</span>
-          {result?.detectedVersion && settings.logoVersion === 'auto' && (
+          {hasDetection && result.detectedVersion && settings.logoVersion === 'auto' && (
             <span className="text-[10px] font-mono text-zinc-500">
               Matched: {result.detectedVersion}
             </span>
           )}
         </div>
-        <div className="grid grid-cols-4 gap-1 p-0.5 rounded-lg bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06]">
+        <div
+          role="group"
+          aria-label="Watermark template version"
+          className="grid grid-cols-4 gap-1 p-0.5 rounded-lg bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06]"
+        >
           {(['auto', 'old', 'new', 'white'] as LogoVersion[]).map((v) => {
             const isActive = settings.logoVersion === v;
             return (
               <button
                 key={v}
+                type="button"
+                aria-pressed={isActive}
                 onClick={() => onUpdateSettings({ logoVersion: v })}
                 className={`py-1.5 px-1 rounded-md text-[11px] font-mono text-center transition-colors cursor-pointer ${
                   isActive
@@ -261,47 +333,67 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
           <span className="text-[10px] font-mono text-zinc-500">1px Micro-Step</span>
         </div>
         <div className="flex items-center justify-center gap-1 bg-zinc-50 dark:bg-[#0c0d10] p-1.5 rounded-lg border border-zinc-200 dark:border-white/[0.06]">
-          <button
-            disabled={nudgeDisabled}
-            onClick={() => onNudge(-1, 0)}
-            title="Nudge Left 1px"
-            className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-          </button>
-          <div className="flex flex-col gap-1">
-            <button
-              disabled={nudgeDisabled}
-            onClick={() => onNudge(0, -1)}
-              title="Nudge Up 1px"
-              className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
-            >
-              <ArrowUp className="w-3.5 h-3.5" />
-            </button>
-            <button
-              disabled={nudgeDisabled}
-            onClick={() => onNudge(0, 1)}
-              title="Nudge Down 1px"
-              className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
-            >
-              <ArrowDown className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          <button
-            disabled={nudgeDisabled}
-            onClick={() => onNudge(1, 0)}
-            title="Nudge Right 1px"
-            className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
-          >
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
+          {(() => {
+            const nudgeDisabled = !result || isProcessing;
+            const nudgeClass =
+              'p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer border border-zinc-200 dark:border-transparent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-zinc-100 dark:disabled:hover:bg-white/[0.04]';
+            return (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onNudge(-1, 0)}
+                  disabled={nudgeDisabled}
+                  aria-label="Nudge watermark left by 1 pixel"
+                  title="Nudge Left 1px"
+                  className={nudgeClass}
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                </button>
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onNudge(0, -1)}
+                    disabled={nudgeDisabled}
+                    aria-label="Nudge watermark up by 1 pixel"
+                    title="Nudge Up 1px"
+                    className={nudgeClass}
+                  >
+                    <ArrowUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onNudge(0, 1)}
+                    disabled={nudgeDisabled}
+                    aria-label="Nudge watermark down by 1 pixel"
+                    title="Nudge Down 1px"
+                    className={nudgeClass}
+                  >
+                    <ArrowDown className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onNudge(1, 0)}
+                  disabled={nudgeDisabled}
+                  aria-label="Nudge watermark right by 1 pixel"
+                  title="Nudge Right 1px"
+                  className={nudgeClass}
+                >
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </>
+            );
+          })()}
         </div>
       </div>
 
       {/* Advanced Inpainting Parameters Accordion */}
       <div className="pt-2 border-t border-zinc-200 dark:border-white/[0.06]">
         <button
+          type="button"
           onClick={() => setShowAdvanced((prev) => !prev)}
+          aria-expanded={showAdvanced}
+          aria-controls="advanced-parameters"
           className="w-full flex items-center justify-between text-[11px] font-medium text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors cursor-pointer"
         >
           <span className="flex items-center gap-1.5">
@@ -312,14 +404,15 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
         </button>
 
         {showAdvanced && (
-          <div className="mt-3 flex flex-col gap-3 text-xs pt-1">
+          <div id="advanced-parameters" className="mt-3 flex flex-col gap-3 text-xs pt-1">
             {/* Mask Scale Slider */}
             <div className="flex flex-col gap-1">
               <div className="flex justify-between items-center text-[11px]">
-                <span className="text-zinc-600 dark:text-zinc-400">Mask Scale Multiplier</span>
+                <label htmlFor="mask-scale" className="text-zinc-600 dark:text-zinc-400">Mask Scale Multiplier</label>
                 <span className="font-mono text-zinc-950 dark:text-zinc-200">{localMaskScale.toFixed(2)}×</span>
               </div>
               <input
+                id="mask-scale"
                 type="range"
                 min="0.5"
                 max="2.0"
@@ -336,10 +429,11 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
             {/* Core Inpainting Radius */}
             <div className="flex flex-col gap-1">
               <div className="flex justify-between items-center text-[11px]">
-                <span className="text-zinc-600 dark:text-zinc-400">Core Diffusion Radius</span>
+                <label htmlFor="fill-radius" className="text-zinc-600 dark:text-zinc-400">Core Diffusion Radius</label>
                 <span className="font-mono text-zinc-950 dark:text-zinc-200">{localFillRadius} px</span>
               </div>
               <input
+                id="fill-radius"
                 type="range"
                 min="0"
                 max="5"
@@ -358,7 +452,8 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
 
             {/* Reset Defaults */}
             <button
-              onClick={onResetSettings}
+              type="button"
+              onClick={handleResetDefaults}
               className="mt-1 w-full py-1.5 px-2.5 rounded-md border border-zinc-200 dark:border-white/[0.08] bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.03] dark:hover:bg-white/[0.06] text-zinc-700 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200 text-[11px] font-mono flex items-center justify-center gap-1.5 transition cursor-pointer"
             >
               <RotateCcw className="w-3 h-3 text-zinc-500" />
@@ -370,5 +465,3 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
     </div>
   );
 };
-
-export const ControlsPanel = React.memo(ControlsPanelImpl);

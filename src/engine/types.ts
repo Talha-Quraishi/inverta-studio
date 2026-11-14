@@ -52,6 +52,13 @@ export interface DetectionResult {
   gainApplied: number;
   detectedVersion?: 'old' | 'new' | 'white';
   detectedCorner?: WatermarkCorner;
+  /**
+   * Exact template that produced this result. Removal must reuse this mask
+   * instead of re-deriving it from `size`, otherwise a scale multiplier can be
+   * applied twice and produce a size/data mismatch.
+   */
+  alphaMap?: Float32Array;
+  maskSize?: number;
 }
 
 export interface RemovalResult {
@@ -76,17 +83,20 @@ export interface ProcessedItem {
   size: number;
   mediaType: 'image' | 'video';
   originalUrl: string;
+  /** Seekable proxy of the source for videos whose own MP4 sync table is broken. */
+  playbackUrl?: string;
   originalWidth: number;
   originalHeight: number;
-  sourceImageData?: ImageData;
   processedUrl?: string;
-  processedImageData?: ImageData;
+  /** File extension for the exported result (png, jpg, webp or mp4). */
+  outputExtension?: string;
+  /** Detected source frame rate for frame-accurate video stepping. */
+  fps?: number;
+  /** Non-fatal processing notice, e.g. an unsupported audio codec. */
+  warning?: string;
   status: 'idle' | 'processing' | 'done' | 'error';
   result?: RemovalResult;
   videoProgress?: { stage: string; ratio: number };
-  videoFps?: number;
-  /** Manual watermark placement (nudge) for this file only. */
-  forcePosition?: { x: number; y: number; size?: number } | null;
   detectedVersion?: 'old' | 'new' | 'white';
   error?: string;
 }
