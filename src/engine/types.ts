@@ -85,6 +85,8 @@ export interface ProcessedItem {
   result?: RemovalResult;
   videoProgress?: { stage: string; ratio: number };
   videoFps?: number;
+  /** Manual watermark placement (nudge) for this file only. */
+  forcePosition?: { x: number; y: number; size?: number } | null;
   detectedVersion?: 'old' | 'new' | 'white';
   error?: string;
 }

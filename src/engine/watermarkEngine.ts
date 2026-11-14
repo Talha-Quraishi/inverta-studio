@@ -108,7 +108,7 @@ export class WatermarkEngine {
         alphaMap: chosen.alphaMap,
         x: clampedX,
         y: clampedY,
-        ncc: Math.max(score, s.nccAccept),
+        ncc: score, // real match quality, so the HUD doesn't overstate confidence
         autoX: width - 64 - chosen.size,
         autoY: height - 64 - chosen.size,
         method: 'forced',
@@ -244,10 +244,12 @@ export class WatermarkEngine {
     }
 
     const isDrifted = bestCandidate.x !== bestCandidate.autoX || bestCandidate.y !== bestCandidate.autoY;
-    const gainApplied = isDrifted ? s.gainDrift : 1.0;
+    // A manually placed watermark isn't a "drifted" detection: capping its gain would leave a ghost
+    // for full-strength marks, so let the adaptive opacity estimator pick the strength instead.
+    const gainApplied = isDrifted && bestCandidate.method !== 'forced' ? s.gainDrift : 1.0;
 
     return {
-      detected: bestCandidate.ncc >= s.nccAccept,
+      detected: bestCandidate.method === 'forced' || bestCandidate.ncc >= s.nccAccept,
       confidence: Math.max(0, Math.min(1, bestCandidate.ncc)),
       ncc: bestCandidate.ncc,
       x: bestCandidate.x,
