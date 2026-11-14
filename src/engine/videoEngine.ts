@@ -169,7 +169,7 @@ export async function loadAllMaskCandidates(
   // 2026 Sparkle is exclusive to 1080p+ models (or when explicitly forced by user).
   const versions: Array<'old' | 'new' | 'white'> =
     logoVersion === 'auto'
-      ? (minDim <= 720 ? ['old'] : ['old', 'new'])
+      ? ['new', 'old', 'white']
       : [logoVersion];
 
   const cClassic = Math.round(84 * resScale * maskScale);

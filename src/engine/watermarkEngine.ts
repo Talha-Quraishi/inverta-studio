@@ -1,6 +1,6 @@
 import { AlphaMaskManager } from './alphaMasks';
 import { diffusionFill, dilateMask } from './diffusionFill';
-import { nccAt, restorationRatio, scanCorner } from './nccMatcher';
+import { nccAt, scanCorner } from './nccMatcher';
 import { DEFAULT_SETTINGS } from './types';
 import type {
   DetectionResult,
@@ -8,33 +8,6 @@ import type {
   WatermarkCorner,
   WatermarkSettings,
 } from './types';
-
-// Detection is "propose, then verify".
-//
-// Template correlation (NCC) proposes candidate spots, but it cannot decide on its own: on a busy
-// picture chance matches score as high as the real logo (measured on a Diwali artwork: the real mark
-// 0.54, random spots up to 0.64-0.71). So a candidate is only accepted when undoing it makes the
-// picture smoother along the logo's outline (see restorationRatio): ~0.7 for a real mark versus
-// >= 1.2 for every random spot tested.
-const VERIFY_MAX_RATIO = 0.85; // accept a candidate whose restoration ratio is at or below this
-const CANONICAL_MIN_NCC = 0.15; // sanity floor for the standard Gemini position
-const SEARCH_MIN_NCC = 0.25; // a wider-search candidate must at least correlate a little
-const POOL_SIZE = 96; // wider-search candidates kept for verification
-
-interface Candidate {
-  size: number;
-  version: 'old' | 'new' | 'white';
-  corner: WatermarkCorner;
-  alphaMap: Float32Array;
-  x: number;
-  y: number;
-  ncc: number;
-  /** Restoration ratio (lower is better); computed lazily for wider-search candidates. */
-  ratio?: number;
-  autoX: number;
-  autoY: number;
-  method: 'auto' | 'scan' | 'forced';
-}
 
 export class WatermarkEngine {
   private maskManager = new AlphaMaskManager();
@@ -66,57 +39,6 @@ export class WatermarkEngine {
   }
 
   /**
-   * Evaluates the standard Gemini position (bottom-right, fixed size and margin, +-2px) for every
-   * template version. Returns the best-restoring spot per version, each with its ratio filled in.
-   */
-  private findCanonicalCandidates(
-    data: Uint8ClampedArray,
-    width: number,
-    height: number,
-    s: WatermarkSettings
-  ): Candidate[] {
-    if (s.corner !== 'auto' && s.corner !== 'bottom-right') return [];
-    const cfg = this.getWatermarkConfig(width, height);
-    if (cfg.x < 0 || cfg.y < 0) return [];
-
-    const versions: Array<'old' | 'new' | 'white'> =
-      s.logoVersion === 'auto' ? ['old', 'new', 'white'] : [s.logoVersion];
-    const logoValue = s.logoValue || 250;
-
-    const out: Candidate[] = [];
-    for (const version of versions) {
-      const alphaMap = this.maskManager.getBaseMap(cfg.logoSize, version);
-      let best: Candidate | null = null;
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const x = cfg.x + dx;
-          const y = cfg.y + dy;
-          const ncc = nccAt(data, width, height, alphaMap, cfg.logoSize, x, y);
-          if (ncc < CANONICAL_MIN_NCC) continue;
-          const ratio = restorationRatio(data, width, height, alphaMap, cfg.logoSize, x, y, logoValue);
-          if (!best || ratio < (best.ratio ?? Infinity)) {
-            best = {
-              size: cfg.logoSize,
-              version,
-              corner: 'bottom-right',
-              alphaMap,
-              x,
-              y,
-              ncc,
-              ratio,
-              autoX: x, // the standard position, not a "drifted" detection
-              autoY: y,
-              method: 'auto',
-            };
-          }
-        }
-      }
-      if (best) out.push(best);
-    }
-    return out;
-  }
-
-  /**
    * Detects the watermark location and correlation score without modifying the image.
    */
   public detect(imageData: ImageData, customSettings?: Partial<WatermarkSettings>): DetectionResult {
@@ -127,7 +49,7 @@ export class WatermarkEngine {
 
     const versionsToTest: Array<'old' | 'new' | 'white'> =
       s.logoVersion === 'auto'
-        ? (minDim <= 720 ? ['old'] : ['old', 'new'])
+        ? ['new', 'old', 'white']
         : [s.logoVersion];
 
     const computedClassic = Math.round(84 * resScale * s.maskScale);
@@ -156,10 +78,18 @@ export class WatermarkEngine {
       }
     }
 
-    let bestCandidate: Candidate | null = null;
-    let detected = false;
-    let canonicals: Candidate[] = [];
-    const pool: Candidate[] = [];
+    let bestCandidate: {
+      size: number;
+      version: 'old' | 'new' | 'white';
+      corner: WatermarkCorner;
+      alphaMap: Float32Array;
+      x: number;
+      y: number;
+      ncc: number;
+      autoX: number;
+      autoY: number;
+      method: 'auto' | 'scan' | 'forced';
+    } | null = null;
 
     if (s.forcePosition && Number.isFinite(s.forcePosition.x) && Number.isFinite(s.forcePosition.y)) {
       const targetSize = s.forcePosition.size || (width > 1024 && height > 1024 ? 96 : 48);
@@ -183,96 +113,64 @@ export class WatermarkEngine {
         autoY: height - 64 - chosen.size,
         method: 'forced',
       };
-      detected = true;
     } else {
-      const logoValue = s.logoValue || 250;
-      const minSearchNcc = Math.min(s.nccAccept, SEARCH_MIN_NCC);
-      const isVerified = (c: Candidate) => (c.ratio ?? Infinity) <= VERIFY_MAX_RATIO;
-
-      // Stage 1: the standard Gemini position. Cheap, and right for almost every real image.
-      canonicals = this.findCanonicalCandidates(data, width, height, s);
-      for (const c of canonicals) {
-        if (isVerified(c) && (!bestCandidate || (c.ratio ?? Infinity) < (bestCandidate.ratio ?? Infinity))) {
-          bestCandidate = c;
-          detected = true;
+      // Priority standard and resolution-scaled margin pairs checked first
+      const baseMargins = [222, 186, 144, 138, 132, 128, 120, 96, 72, 64, 48, 36, 32, 28, 24, 20, 16];
+      const mSet = new Set<number>();
+      for (const m of baseMargins) {
+        mSet.add(m);
+        const scaled = Math.round(m * resScale);
+        if (scaled >= 12 && scaled < minDim * 0.4) mSet.add(scaled);
+      }
+      const margins = Array.from(mSet);
+      const marginPairs: [number, number][] = [];
+      for (const m of margins) {
+        marginPairs.push([m, m]);
+      }
+      const commonRatios = [
+        [1.2, 1.0], [1.0, 1.2],
+        [1.33, 1.0], [1.0, 1.33],
+        [1.5, 1.0], [1.0, 1.5],
+      ];
+      for (const m of margins) {
+        for (const [rx, ry] of commonRatios) {
+          const mx = Math.round(m * rx);
+          const my = Math.round(m * ry);
+          if (mx < minDim * 0.4 && my < minDim * 0.4) {
+            marginPairs.push([mx, my]);
+          }
         }
       }
 
-      if (!detected) {
-        // Stage 2: wider search (other margins, sizes, corners). Candidates are pooled by correlation,
-        // then verified; the first corner holding a verified candidate wins.
-        const consider = (c: Candidate) => {
-          if (c.ncc < minSearchNcc) return;
-          if (pool.some((p) => p.size === c.size && p.version === c.version && p.x === c.x && p.y === c.y)) return;
-          pool.push(c);
-          pool.sort((a, b) => b.ncc - a.ncc);
-          if (pool.length > POOL_SIZE) pool.length = POOL_SIZE;
-        };
-        const pickVerified = (): Candidate | null => {
-          let best: Candidate | null = null;
-          for (const c of pool) {
-            if (c.ratio === undefined) {
-              c.ratio = restorationRatio(data, width, height, c.alphaMap, c.size, c.x, c.y, logoValue);
+      const cornerOrder: Array<'bottom-right' | 'bottom-left' | 'top-right' | 'top-left'> =
+        s.corner === 'auto'
+          ? ['bottom-right', 'bottom-left', 'top-right', 'top-left']
+          : [s.corner];
+
+      for (const cornerKey of cornerOrder) {
+        // Phase 1: Test multi-margin candidate grid across all template sizes and versions for this corner
+        for (const candidate of baseSizes) {
+          for (const [mx, my] of marginPairs) {
+            let autoX = 0;
+            let autoY = 0;
+            if (cornerKey === 'bottom-right') {
+              autoX = Math.max(0, Math.min(width - candidate.size, width - mx - candidate.size));
+              autoY = Math.max(0, Math.min(height - candidate.size, height - my - candidate.size));
+            } else if (cornerKey === 'bottom-left') {
+              autoX = Math.max(0, Math.min(width - candidate.size, mx));
+              autoY = Math.max(0, Math.min(height - candidate.size, height - my - candidate.size));
+            } else if (cornerKey === 'top-right') {
+              autoX = Math.max(0, Math.min(width - candidate.size, width - mx - candidate.size));
+              autoY = Math.max(0, Math.min(height - candidate.size, my));
+            } else if (cornerKey === 'top-left') {
+              autoX = Math.max(0, Math.min(width - candidate.size, mx));
+              autoY = Math.max(0, Math.min(height - candidate.size, my));
             }
-            if (isVerified(c) && (!best || c.ratio < (best.ratio ?? Infinity))) best = c;
-          }
-          return best;
-        };
 
-        const baseMargins = [222, 186, 144, 138, 132, 128, 120, 96, 72, 64, 48, 36, 32, 28, 24, 20, 16];
-        const mSet = new Set<number>();
-        for (const m of baseMargins) {
-          mSet.add(m);
-          const scaled = Math.round(m * resScale);
-          if (scaled >= 12 && scaled < minDim * 0.4) mSet.add(scaled);
-        }
-        const margins = Array.from(mSet);
-        const marginPairs: [number, number][] = [];
-        for (const m of margins) {
-          marginPairs.push([m, m]);
-        }
-        const commonRatios = [
-          [1.2, 1.0], [1.0, 1.2],
-          [1.33, 1.0], [1.0, 1.33],
-          [1.5, 1.0], [1.0, 1.5],
-        ];
-        for (const m of margins) {
-          for (const [rx, ry] of commonRatios) {
-            const mx = Math.round(m * rx);
-            const my = Math.round(m * ry);
-            if (mx < minDim * 0.4 && my < minDim * 0.4) {
-              marginPairs.push([mx, my]);
-            }
-          }
-        }
+            const score = nccAt(data, width, height, candidate.alphaMap, candidate.size, autoX, autoY);
 
-        const cornerOrder: Array<'bottom-right' | 'bottom-left' | 'top-right' | 'top-left'> =
-          s.corner === 'auto'
-            ? ['bottom-right', 'bottom-left', 'top-right', 'top-left']
-            : [s.corner];
-
-        for (const cornerKey of cornerOrder) {
-          // Phase 1: multi-margin candidate grid across all template sizes and versions
-          for (const candidate of baseSizes) {
-            for (const [mx, my] of marginPairs) {
-              let autoX = 0;
-              let autoY = 0;
-              if (cornerKey === 'bottom-right') {
-                autoX = Math.max(0, Math.min(width - candidate.size, width - mx - candidate.size));
-                autoY = Math.max(0, Math.min(height - candidate.size, height - my - candidate.size));
-              } else if (cornerKey === 'bottom-left') {
-                autoX = Math.max(0, Math.min(width - candidate.size, mx));
-                autoY = Math.max(0, Math.min(height - candidate.size, height - my - candidate.size));
-              } else if (cornerKey === 'top-right') {
-                autoX = Math.max(0, Math.min(width - candidate.size, width - mx - candidate.size));
-                autoY = Math.max(0, Math.min(height - candidate.size, my));
-              } else if (cornerKey === 'top-left') {
-                autoX = Math.max(0, Math.min(width - candidate.size, mx));
-                autoY = Math.max(0, Math.min(height - candidate.size, my));
-              }
-
-              const score = nccAt(data, width, height, candidate.alphaMap, candidate.size, autoX, autoY);
-              consider({
+            if (!bestCandidate || score > bestCandidate.ncc) {
+              bestCandidate = {
                 size: candidate.size,
                 version: candidate.version,
                 corner: cornerKey,
@@ -283,26 +181,31 @@ export class WatermarkEngine {
                 autoX,
                 autoY,
                 method: 'auto',
-              });
+              };
             }
+            if (bestCandidate && bestCandidate.ncc >= 0.70) break;
           }
+          if (bestCandidate && bestCandidate.ncc >= 0.70) break;
+        }
 
-          let hit = pickVerified();
+        // If highly confident match found in margins, break early
+        if (bestCandidate && bestCandidate.ncc >= 0.65) break;
 
-          // Phase 2: corner spatial scan when no margin candidate survived verification
-          if (!hit) {
-            for (const candidate of baseSizes) {
-              const scan = scanCorner(
-                data,
-                width,
-                height,
-                candidate.alphaMap,
-                candidate.size,
-                cornerKey,
-                s.scanStride || 8,
-                s.refineRadius || 6
-              );
-              consider({
+        // Phase 2: Corner spatial scan if margin check is below acceptance threshold
+        if (!bestCandidate || bestCandidate.ncc < s.nccAccept) {
+          for (const candidate of baseSizes) {
+            const scan = scanCorner(
+              data,
+              width,
+              height,
+              candidate.alphaMap,
+              candidate.size,
+              cornerKey,
+              s.scanStride || 8,
+              s.refineRadius || 6
+            );
+            if (!bestCandidate || scan.ncc > bestCandidate.ncc) {
+              bestCandidate = {
                 size: candidate.size,
                 version: candidate.version,
                 corner: cornerKey,
@@ -313,39 +216,28 @@ export class WatermarkEngine {
                 autoX: scan.x,
                 autoY: scan.y,
                 method: 'scan',
-              });
+              };
             }
-            hit = pickVerified();
-          }
-
-          if (hit) {
-            bestCandidate = hit;
-            detected = true;
-            break;
+            if (bestCandidate && bestCandidate.ncc >= 0.50) break;
           }
         }
-      }
 
-      // Nothing verified: report the standard position when we have one (a sensible place for the
-      // nudge controls to start from), otherwise the best-correlating candidate.
-      if (!bestCandidate) {
-        bestCandidate =
-          canonicals.reduce<Candidate | null>((b, c) => (!b || c.ncc > b.ncc ? c : b), null) ?? pool[0] ?? null;
+        // If confirmed in this corner, no need to scan remaining corners
+        if (bestCandidate && bestCandidate.ncc >= s.nccAccept) break;
       }
     }
 
     if (!bestCandidate) {
-      const cfg = this.getWatermarkConfig(width, height);
       return {
         detected: false,
         confidence: 0,
         ncc: 0,
-        x: Math.max(0, cfg.x),
-        y: Math.max(0, cfg.y),
-        size: cfg.logoSize,
+        x: 0,
+        y: 0,
+        size: 48,
         method: 'auto',
-        autoX: Math.max(0, cfg.x),
-        autoY: Math.max(0, cfg.y),
+        autoX: 0,
+        autoY: 0,
         drifted: false,
         gainApplied: 1.0,
       };
@@ -357,7 +249,7 @@ export class WatermarkEngine {
     const gainApplied = isDrifted && bestCandidate.method !== 'forced' ? s.gainDrift : 1.0;
 
     return {
-      detected,
+      detected: bestCandidate.method === 'forced' || bestCandidate.ncc >= s.nccAccept,
       confidence: Math.max(0, Math.min(1, bestCandidate.ncc)),
       ncc: bestCandidate.ncc,
       x: bestCandidate.x,
@@ -390,7 +282,7 @@ export class WatermarkEngine {
         cleanImageData: sourceImageData,
         result: {
           success: false,
-          message: `No watermark verified (best correlation ${detection.ncc.toFixed(3)}; removing it there did not restore the picture)`,
+          message: `No watermark detected (best NCC ${detection.ncc.toFixed(3)} < threshold ${s.nccAccept})`,
           position: { x: detection.x, y: detection.y },
           size: detection.size,
           confidence: detection.confidence,
