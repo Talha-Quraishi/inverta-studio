@@ -14,7 +14,7 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.3.4",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.70.0",
+    "lucide-react": "^1.72.0",
     "mp4-muxer": "^5.2.2",
     "mp4box": "^2.5.0",
     "react": "^19.3.1",
