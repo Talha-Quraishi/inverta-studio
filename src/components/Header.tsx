@@ -37,8 +37,12 @@ const HeaderImpl: React.FC<HeaderProps> = ({
           <div className="flex items-baseline gap-2">
             <span className="font-semibold text-zinc-950 dark:text-white tracking-tight text-[15px]">Inverta</span>
             <span className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400">Studio</span>
-            <span className="hidden sm:inline-block text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.06] text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-white/[0.08]">
-              v2.5
+            <span
+              title={`Version ${__APP_VERSION__} · commit ${__APP_COMMIT__} · built ${__APP_BUILT__}`}
+              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.06] text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-white/[0.08]"
+            >
+              v{__APP_VERSION__}
+              <span className="hidden sm:inline text-zinc-400 dark:text-zinc-500"> · {__APP_COMMIT__}</span>
             </span>
           </div>
         </div>
