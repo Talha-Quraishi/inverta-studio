@@ -18,7 +18,7 @@ import {
   isVideoFile,
   validateFile,
 } from './utils/media';
-import { Loader2, AlertTriangle, RefreshCw, Trash2, X } from 'lucide-react';
+import { Loader2, AlertTriangle, RefreshCw, Trash2, X, Star, ExternalLink } from 'lucide-react';
 
 const VideoPlayerComparison = React.lazy(() =>
   import('./components/VideoPlayerComparison').then((module) => ({
@@ -99,6 +99,22 @@ export const App: React.FC = () => {
   // Per-item generation counters let a newer reprocess win over a batch job
   // that started with older settings, without discarding other items' work.
   const itemVersions = useRef(new Map<string, number>());
+  const [showStarPrompt, setShowStarPrompt] = useState(false);
+  const starPromptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const triggerStarPrompt = useCallback(() => {
+    setShowStarPrompt(true);
+    if (starPromptTimer.current) clearTimeout(starPromptTimer.current);
+    starPromptTimer.current = setTimeout(() => {
+      setShowStarPrompt(false);
+    }, 9000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (starPromptTimer.current) clearTimeout(starPromptTimer.current);
+    };
+  }, []);
 
   const activeItem = items.find((item) => item.id === activeId);
 
@@ -709,7 +725,8 @@ export const App: React.FC = () => {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-  }, []);
+    triggerStarPrompt();
+  }, [triggerStarPrompt]);
 
   const handleDownloadAll = useCallback(() => {
     for (const item of itemsRef.current) {
@@ -724,7 +741,8 @@ export const App: React.FC = () => {
       a.click();
       document.body.removeChild(a);
     }
-  }, []);
+    triggerStarPrompt();
+  }, [triggerStarPrompt]);
 
   const handleRemoveItem = useCallback((id: string) => {
     const controller = videoJobsRef.current.get(id);
@@ -992,6 +1010,39 @@ export const App: React.FC = () => {
           project and is not affiliated with or endorsed by Google.
         </footer>
       </main>
+
+      {showStarPrompt && (
+        <aside
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl bg-white/95 dark:bg-[#14171b]/95 backdrop-blur-md border border-zinc-200 dark:border-white/[0.1] shadow-2xl text-xs text-zinc-800 dark:text-zinc-200"
+        >
+          <div className="flex items-center gap-2">
+            <Star className="w-4 h-4 text-amber-500 fill-amber-500 shrink-0" aria-hidden="true" />
+            <span>Cleaned file exported! If Inverta saved you time, consider leaving a star.</span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <a
+              href="https://github.com/Talha-Quraishi/inverta-studio"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setShowStarPrompt(false)}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-zinc-950 text-white dark:bg-white dark:text-zinc-950 font-medium hover:opacity-90 transition font-mono text-[11px]"
+            >
+              <span>Star on GitHub</span>
+              <ExternalLink className="w-3 h-3" aria-hidden="true" />
+            </a>
+            <button
+              type="button"
+              onClick={() => setShowStarPrompt(false)}
+              aria-label="Dismiss message"
+              className="p-1 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+          </div>
+        </aside>
+      )}
     </div>
   );
 };

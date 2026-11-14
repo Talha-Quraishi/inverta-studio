@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, Trash2, Sun, Moon } from 'lucide-react';
+import { ShieldCheck, Trash2, Sun, Moon, Star } from 'lucide-react';
 
 interface HeaderProps {
   theme: 'dark' | 'light';
@@ -64,6 +64,19 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right utility controls */}
         <div className="flex items-center gap-2 text-xs">
+          {/* GitHub Star Link */}
+          <a
+            href="https://github.com/Talha-Quraishi/inverta-studio"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Star Inverta Studio on GitHub"
+            aria-label="Star Inverta Studio on GitHub"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-zinc-100 hover:bg-amber-50 dark:bg-white/[0.04] dark:hover:bg-amber-500/10 text-zinc-700 hover:text-amber-700 dark:text-zinc-300 dark:hover:text-amber-300 border border-zinc-200 hover:border-amber-300 dark:border-white/[0.06] dark:hover:border-amber-500/30 transition text-[11px] font-mono cursor-pointer"
+          >
+            <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" aria-hidden="true" />
+            <span className="font-medium hidden sm:inline">Star on GitHub</span>
+          </a>
+
           {/* Theme Mode Toggle */}
           <button
             type="button"
