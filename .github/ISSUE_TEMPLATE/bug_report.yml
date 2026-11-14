@@ -1,0 +1,52 @@
+name: 🐛 Bug Report
+description: Report a bug, detection failure, or video processing issue
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please provide as much detail as possible.
+  - type: input
+    id: browser
+    attributes:
+      label: Browser & Operating System
+      description: e.g., Chrome 130 on Windows 11, Edge 130 on macOS Sonoma
+      placeholder: Chrome 130 on Windows 11
+    validations:
+      required: true
+  - type: dropdown
+    id: media_type
+    attributes:
+      label: Media Type
+      options:
+        - Image (PNG, WebP, JPEG)
+        - Video (H.264 MP4)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: resolution
+    attributes:
+      label: File Resolution
+      description: e.g., 2752×1536, 1920×1080 (16:9), 1080×1920 (9:16)
+      placeholder: 2752×1536
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what happened versus what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce the issue?
+      placeholder: |
+        1. Open https://talha-quraishi.github.io/inverta-studio/
+        2. Upload sample media
+        3. ...
+    validations:
+      required: true
