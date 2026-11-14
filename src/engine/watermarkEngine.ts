@@ -441,16 +441,18 @@ export class WatermarkEngine {
       };
     }
 
-    const optimalGain = computeAdaptiveOpacity(
-      data,
-      width,
-      height,
-      originX,
-      originY,
-      mask,
-      maskSize,
-      s.logoValue || 250
-    );
+    const optimalGain = detection.drifted
+      ? computeAdaptiveOpacity(
+          data,
+          width,
+          height,
+          originX,
+          originY,
+          mask,
+          maskSize,
+          s.logoValue || 250
+        )
+      : 1.0;
     const effectiveGain = Math.min(detection.gainApplied, optimalGain);
 
     // Determine if inpainting should run

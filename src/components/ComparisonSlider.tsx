@@ -369,24 +369,24 @@ export const ComparisonSlider: React.FC<ComparisonSliderProps> = ({
               alt="Original watermarked"
               className="max-w-full max-h-[70vh] w-auto h-auto object-contain block pointer-events-none select-none"
             />
-          </div>
 
-          {/* Watermark detection bounding box indicator */}
-          {hasDetection && showHighlight && result && (
-            <div
-              className="absolute pointer-events-none border border-white/70 bg-white/[0.08] rounded transition-opacity"
-              style={{
-                left: `${(result.position.x / width) * 100}%`,
-                top: `${(result.position.y / height) * 100}%`,
-                width: `${(result.size / width) * 100}%`,
-                height: `${(result.size / height) * 100}%`,
-              }}
-            >
-              <span className="absolute -top-4 right-0 text-[9px] font-mono font-medium px-1 py-0.2 rounded bg-white text-zinc-950 shadow-xs">
-                Watermark
-              </span>
-            </div>
-          )}
+            {/* Watermark detection bounding box indicator on the original reference side */}
+            {hasDetection && showHighlight && result && (
+              <div
+                className="absolute pointer-events-none border border-white/70 bg-white/[0.08] rounded transition-opacity"
+                style={{
+                  left: `${(result.position.x / width) * 100}%`,
+                  top: `${(result.position.y / height) * 100}%`,
+                  width: `${(result.size / width) * 100}%`,
+                  height: `${(result.size / height) * 100}%`,
+                }}
+              >
+                <span className="absolute -top-4 right-0 text-[9px] font-mono font-medium px-1 py-0.2 rounded bg-white text-zinc-950 shadow-xs">
+                  Watermark
+                </span>
+              </div>
+            )}
+          </div>
 
           {/* Vertical Hairline Split Divider */}
           <div
