@@ -61,6 +61,8 @@ export const App: React.FC = () => {
   const jobSeqRef = useRef(0);
   const jobAbortRef = useRef<AbortController | null>(null);
   const jobItemIdRef = useRef('');
+  // Cancels in-flight first-time processing when a file is removed.
+  const itemAbortersRef = useRef(new Map<string, AbortController>());
 
   // Sync theme with HTML root class and local storage
   useEffect(() => {
@@ -267,14 +269,33 @@ export const App: React.FC = () => {
       await new Promise((resolve) => setTimeout(resolve, 40));
 
       for (const item of newItems) {
+        // Skip files the user already removed while earlier ones were processing.
+        if (!itemsRef.current.some((i) => i.id === item.id)) continue;
+
+        const controller = new AbortController();
+        itemAbortersRef.current.set(item.id, controller);
         // A manual nudge belongs to one specific file; never apply it to newly added ones.
         const currentSettings: WatermarkSettings = { ...settingsRef.current, forcePosition: null };
-        if (item.mediaType === 'video') {
-          const processed = await processVideoItem(item, currentSettings);
-          setItems((prev) => prev.map((p) => (p.id === item.id ? processed : p)));
-        } else {
-          const processed = await processImage(item, currentSettings);
-          setItems((prev) => prev.map((p) => (p.id === item.id ? processed : p)));
+        try {
+          const processed =
+            item.mediaType === 'video'
+              ? await processVideoItem(item, currentSettings, controller.signal)
+              : await processImage(item, currentSettings);
+
+          if (itemsRef.current.some((i) => i.id === item.id)) {
+            setItems((prev) => prev.map((p) => (p.id === item.id ? processed : p)));
+          } else if (
+            processed.processedUrl &&
+            processed.processedUrl !== processed.originalUrl &&
+            processed.processedUrl.startsWith('blob:')
+          ) {
+            // Removed while processing: release the output instead of leaking it.
+            URL.revokeObjectURL(processed.processedUrl);
+          }
+        } catch (err) {
+          if (!isAbortError(err)) console.error('Processing error:', err);
+        } finally {
+          itemAbortersRef.current.delete(item.id);
         }
         // Yield between items in batch
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -287,9 +308,13 @@ export const App: React.FC = () => {
   // Re-process active item when settings or nudge change (with instant fast path).
   // Reads the latest state from refs so the callback (and everything built on it) stays stable.
   const reprocessActiveItem = useCallback(
-    async (newSettings: WatermarkSettings) => {
+    async (baseSettings: WatermarkSettings, forcePosition?: ProcessedItem['forcePosition']) => {
       const activeItem = itemsRef.current.find((i) => i.id === activeIdRef.current);
       if (!activeItem) return;
+
+      // Manual placement is stored per file: an explicit value wins, otherwise keep the file's own.
+      const fp = forcePosition !== undefined ? forcePosition : activeItem.forcePosition ?? null;
+      const newSettings: WatermarkSettings = { ...baseSettings, forcePosition: fp };
 
       // Supersede any job still running: abort it and make sure only this one can publish.
       const jobId = ++jobSeqRef.current;
@@ -321,7 +346,7 @@ export const App: React.FC = () => {
           if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
             URL.revokeObjectURL(prevProcessedUrl);
           }
-          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? { ...updated, forcePosition: fp } : item)));
         } else if (activeItem.sourceImageData) {
           // Fast path: Invert directly from cached memory buffer in ~3ms without re-rasterizing
           try {
@@ -354,7 +379,7 @@ export const App: React.FC = () => {
                 detectedVersion: result.detectedVersion,
                 result,
               };
-              setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+              setItems((prev) => prev.map((item) => (item.id === activeItem.id ? { ...updated, forcePosition: fp } : item)));
             }
           } catch (err) {
             console.error('Fast reprocess error:', err);
@@ -371,7 +396,7 @@ export const App: React.FC = () => {
           if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
             URL.revokeObjectURL(prevProcessedUrl);
           }
-          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? { ...updated, forcePosition: fp } : item)));
         }
       } catch (err) {
         if (!isAbortError(err)) {
@@ -383,7 +408,10 @@ export const App: React.FC = () => {
           );
         }
       } finally {
-        if (isLatest()) setIsProcessing(false);
+        if (isLatest()) {
+          setIsProcessing(false);
+          jobItemIdRef.current = '';
+        }
       }
     },
     [processImage, processVideoItem]
@@ -402,24 +430,20 @@ export const App: React.FC = () => {
   const handleResetSettings = useCallback(() => {
     settingsRef.current = DEFAULT_SETTINGS;
     setSettings(DEFAULT_SETTINGS);
-    void reprocessActiveItem(DEFAULT_SETTINGS);
+    void reprocessActiveItem(DEFAULT_SETTINGS, null); // also clears this file's manual placement
   }, [reprocessActiveItem]);
 
   const handleNudge = useCallback(
     (dx: number, dy: number) => {
       const item = itemsRef.current.find((i) => i.id === activeIdRef.current);
-      if (!item?.result) return;
-      const updatedSettings: WatermarkSettings = {
-        ...settingsRef.current,
-        forcePosition: {
-          x: item.result.position.x + dx,
-          y: item.result.position.y + dy,
-          size: item.result.size,
-        },
-      };
-      settingsRef.current = updatedSettings;
-      setSettings(updatedSettings);
-      void reprocessActiveItem(updatedSettings);
+      // Nothing to move when no watermark was located (e.g. a video returned untouched).
+      if (!item?.result || item.result.size <= 0) return;
+      const base = item.forcePosition ?? { ...item.result.position, size: item.result.size };
+      void reprocessActiveItem(settingsRef.current, {
+        x: base.x + dx,
+        y: base.y + dy,
+        size: base.size ?? item.result.size,
+      });
     },
     [reprocessActiveItem]
   );
@@ -448,17 +472,18 @@ export const App: React.FC = () => {
     });
   }, []);
 
-  const handleSelectItem = useCallback((id: string) => {
-    setActiveId(id);
-    // The nudged position was set for the previous item; reset it so later edits don't misplace this one.
-    if (settingsRef.current.forcePosition) {
-      const cleared: WatermarkSettings = { ...settingsRef.current, forcePosition: null };
-      settingsRef.current = cleared;
-      setSettings(cleared);
-    }
-  }, []);
+  const handleSelectItem = useCallback((id: string) => setActiveId(id), []);
 
   const handleRemoveItem = useCallback((id: string) => {
+    // Stop any work still running for this file so it doesn't burn CPU or leak its output.
+    itemAbortersRef.current.get(id)?.abort();
+    itemAbortersRef.current.delete(id);
+    if (jobItemIdRef.current === id) {
+      jobAbortRef.current?.abort();
+      jobSeqRef.current++;
+      jobItemIdRef.current = '';
+      setIsProcessing(false);
+    }
     const items = itemsRef.current;
     const itemToRemove = items.find((item) => item.id === id);
     if (itemToRemove) {
@@ -478,6 +503,12 @@ export const App: React.FC = () => {
   }, []);
 
   const handleClearAll = useCallback(() => {
+    itemAbortersRef.current.forEach((controller) => controller.abort());
+    itemAbortersRef.current.clear();
+    jobAbortRef.current?.abort();
+    jobSeqRef.current++;
+    jobItemIdRef.current = '';
+    setIsProcessing(false);
     itemsRef.current.forEach((item) => {
       if (item.originalUrl && item.originalUrl.startsWith('blob:')) {
         URL.revokeObjectURL(item.originalUrl);
@@ -643,6 +674,7 @@ export const App: React.FC = () => {
                   onResetSettings={handleResetSettings}
                   onDownload={handleDownload}
                   onNudge={handleNudge}
+                  canNudge={Boolean(activeItem?.result && activeItem.result.size > 0)}
                   isProcessing={isProcessing}
                   fileName={activeItem?.name || 'cleaned_file'}
                   mediaType={activeItem?.mediaType}

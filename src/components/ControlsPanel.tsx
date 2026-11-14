@@ -19,6 +19,8 @@ interface ControlsPanelProps {
   onResetSettings: () => void;
   onDownload: () => void;
   onNudge: (dx: number, dy: number) => void;
+  /** False when no watermark location exists to move (e.g. nothing detected in a video). */
+  canNudge?: boolean;
   isProcessing: boolean;
   fileName: string;
   mediaType?: 'image' | 'video';
@@ -32,11 +34,13 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
   onResetSettings,
   onDownload,
   onNudge,
+  canNudge = true,
   isProcessing,
   fileName,
   mediaType = 'image',
   hasOutput = false,
 }) => {
+  const nudgeDisabled = !canNudge || isProcessing;
   const [showAdvanced, setShowAdvanced] = useState(true);
   const [localMaskScale, setLocalMaskScale] = useState(settings.maskScale);
   const [localFillRadius, setLocalFillRadius] = useState(settings.fillRadius);
@@ -258,32 +262,36 @@ const ControlsPanelImpl: React.FC<ControlsPanelProps> = ({
         </div>
         <div className="flex items-center justify-center gap-1 bg-zinc-50 dark:bg-[#0c0d10] p-1.5 rounded-lg border border-zinc-200 dark:border-white/[0.06]">
           <button
+            disabled={nudgeDisabled}
             onClick={() => onNudge(-1, 0)}
             title="Nudge Left 1px"
-            className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer border border-zinc-200 dark:border-transparent"
+            className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
           </button>
           <div className="flex flex-col gap-1">
             <button
-              onClick={() => onNudge(0, -1)}
+              disabled={nudgeDisabled}
+            onClick={() => onNudge(0, -1)}
               title="Nudge Up 1px"
-              className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer border border-zinc-200 dark:border-transparent"
+              className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
             >
               <ArrowUp className="w-3.5 h-3.5" />
             </button>
             <button
-              onClick={() => onNudge(0, 1)}
+              disabled={nudgeDisabled}
+            onClick={() => onNudge(0, 1)}
               title="Nudge Down 1px"
-              className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer border border-zinc-200 dark:border-transparent"
+              className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
             >
               <ArrowDown className="w-3.5 h-3.5" />
             </button>
           </div>
           <button
+            disabled={nudgeDisabled}
             onClick={() => onNudge(1, 0)}
             title="Nudge Right 1px"
-            className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer border border-zinc-200 dark:border-transparent"
+            className="p-1.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-white/[0.04] dark:hover:bg-white/[0.08] text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed border border-zinc-200 dark:border-transparent"
           >
             <ArrowRight className="w-3.5 h-3.5" />
           </button>

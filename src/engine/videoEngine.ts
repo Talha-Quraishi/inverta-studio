@@ -1183,7 +1183,9 @@ export async function processVideo(
 
   // After detection only a small padded window around the watermark needs to be read back
   // to JS and edited; the rest of the frame never leaves the canvas.
-  const REGION_PAD = 8;
+  // Wide enough that edge clean-up (which reads `edgeRadius` pixels around the mark) sees the same pixels
+  // it would on a full frame.
+  const REGION_PAD = 8 + Math.max(0, Math.ceil(s.edgeRadius || 0));
   let cleanRegion: {
     rx: number;
     ry: number;
