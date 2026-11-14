@@ -153,3 +153,72 @@ export function scanBottomRight(
 ): MatchPoint {
   return scanCorner(data, imgWidth, imgHeight, template, templateSize, 'bottom-right', scanStride, refineRadius);
 }
+
+/**
+ * How much smoother does the picture get along the logo's outline if the watermark is undone here?
+ *
+ * Returns (edge energy after inversion) / (edge energy before), using the best of a few plausible
+ * opacities. Undoing a real translucent logo removes its edges (ratio well below 1), whereas
+ * "undoing" a logo that is not there paints a brand-new logo-shaped edge (ratio above 1). This
+ * separates the true mark from chance correlations with the artwork, which NCC alone cannot do.
+ * Returns Infinity when there is no usable signal.
+ */
+export function restorationRatio(
+  data: Uint8ClampedArray,
+  imgWidth: number,
+  imgHeight: number,
+  alphaMap: Float32Array,
+  size: number,
+  x0: number,
+  y0: number,
+  logoValue = 250
+): number {
+  const pad = 1;
+  const span = size + 2 * pad;
+  const lum = new Float32Array(span * span);
+  for (let j = 0; j < span; j++) {
+    const yy = Math.min(imgHeight - 1, Math.max(0, y0 - pad + j));
+    for (let i = 0; i < span; i++) {
+      const xx = Math.min(imgWidth - 1, Math.max(0, x0 - pad + i));
+      const p = (yy * imgWidth + xx) * 4;
+      lum[j * span + i] = 0.2126 * data[p] + 0.7152 * data[p + 1] + 0.0722 * data[p + 2];
+    }
+  }
+
+  const band: number[] = [];
+  for (let k = 0; k < size * size; k++) {
+    if (alphaMap[k] > 0.04) band.push(k);
+  }
+  if (band.length < 16) return Infinity;
+
+  const meanGradient = (buf: Float32Array): number => {
+    let sum = 0;
+    for (const k of band) {
+      const i = (k % size) + pad;
+      const j = ((k / size) | 0) + pad;
+      const gx = buf[j * span + i + 1] - buf[j * span + i - 1];
+      const gy = buf[(j + 1) * span + i] - buf[(j - 1) * span + i];
+      sum += Math.hypot(gx, gy);
+    }
+    return sum / band.length;
+  };
+
+  const before = meanGradient(lum);
+  if (before < 0.5) return Infinity;
+
+  let best = Infinity;
+  const inverted = new Float32Array(lum.length);
+  for (const gain of [1.0, 0.85, 0.75, 0.62]) {
+    inverted.set(lum);
+    for (let k = 0; k < size * size; k++) {
+      const a = Math.min(alphaMap[k] * gain, 0.99);
+      if (a < 0.002) continue;
+      const idx = (((k / size) | 0) + pad) * span + (k % size) + pad;
+      const v = (lum[idx] - a * logoValue) / (1 - a);
+      inverted[idx] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    const after = meanGradient(inverted);
+    if (after < best) best = after;
+  }
+  return best / before;
+}
