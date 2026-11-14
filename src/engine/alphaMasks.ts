@@ -68,6 +68,34 @@ export class AlphaMaskManager {
     }
   }
 
+  /**
+   * Returns the mask for a watermark of exactly `size` pixels. Sizes without a bundled
+   * template (e.g. 56, 64, 72) are resampled from the nearest template, exactly as the
+   * detector does, so the mask array always has size * size entries.
+   */
+  public getMaskForSize(size: number, version: LogoVersion): MaskData {
+    if (size === 48 || size === 84 || size === 96) {
+      return { alphaMap: this.getBaseMap(size, version), size };
+    }
+    const baseRef = size > 64 ? 96 : version === 'old' ? 84 : 48;
+    return this.getScaledMask(baseRef, size / baseRef, version);
+  }
+
+  /** Resamples an already-sized mask by `scale` (cached). */
+  public rescaleMask(mask: MaskData, scale: number, version: LogoVersion): MaskData {
+    const targetSize = Math.max(4, Math.round(mask.size * (scale || 1.0)));
+    if (targetSize === mask.size) return mask;
+    const cacheKey = `${version}_m${mask.size}_${targetSize}`;
+    const cached = this.scaledCache.get(cacheKey);
+    if (cached) return cached;
+    const result: MaskData = {
+      alphaMap: this.rescaleBilinear(mask.alphaMap, mask.size, targetSize),
+      size: targetSize,
+    };
+    this.scaledCache.set(cacheKey, result);
+    return result;
+  }
+
   public getScaledMask(baseSize: number, scale: number, version: LogoVersion): MaskData {
     const baseMap = this.getBaseMap(baseSize, version);
     const targetSize = Math.max(4, Math.round(baseSize * (scale || 1.0)));

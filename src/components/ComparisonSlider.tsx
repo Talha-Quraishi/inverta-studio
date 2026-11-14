@@ -147,15 +147,12 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
     window.addEventListener('pointerup', onUp);
     window.addEventListener('mousemove', onMove, { passive: true });
     window.addEventListener('mouseup', onUp);
-    window.addEventListener(
-      'touchmove',
-      (e: TouchEvent) => {
-        if (isDraggingSlider.current && e.touches[0]) {
-          handleSliderMove(e.touches[0].clientX);
-        }
-      },
-      { passive: true }
-    );
+    const onTouchMove = (e: TouchEvent) => {
+      if (isDraggingSlider.current && e.touches[0]) {
+        handleSliderMove(e.touches[0].clientX);
+      }
+    };
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
     window.addEventListener('touchend', onUp);
 
     return () => {
@@ -163,6 +160,7 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onUp);
       if (rafId.current !== null) {
         cancelAnimationFrame(rafId.current);
@@ -173,7 +171,16 @@ const ComparisonSliderImpl: React.FC<ComparisonSliderProps> = ({
   // Keyboard shortcuts for studio-grade ergonomics
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Never hijack browser/OS shortcuts (Ctrl+R, Cmd+Z, ...) or typing in form fields.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) {
+        return;
+      }
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault();

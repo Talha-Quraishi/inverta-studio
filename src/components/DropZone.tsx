@@ -48,7 +48,7 @@ const DropZoneImpl: React.FC<DropZoneProps> = ({ onFilesSelected, isCompact = fa
     setIsDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const files = Array.from(e.dataTransfer.files).filter(
-        (f) => f.type.startsWith('image/') || f.type === 'video/mp4' || f.name.endsWith('.mp4')
+        (f) => f.type.startsWith('image/') || f.type === 'video/mp4' || /\.mp4$/i.test(f.name)
       );
       if (files.length > 0) onFilesSelected(files);
     }
@@ -57,7 +57,7 @@ const DropZoneImpl: React.FC<DropZoneProps> = ({ onFilesSelected, isCompact = fa
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const files = Array.from(e.target.files).filter(
-        (f) => f.type.startsWith('image/') || f.type === 'video/mp4' || f.name.endsWith('.mp4')
+        (f) => f.type.startsWith('image/') || f.type === 'video/mp4' || /\.mp4$/i.test(f.name)
       );
       if (files.length > 0) onFilesSelected(files);
       e.target.value = '';

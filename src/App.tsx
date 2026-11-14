@@ -16,14 +16,24 @@ import { Loader2, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 // Whole files are held in memory while demuxing, so very large videos would crash the tab.
 const MAX_VIDEO_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
+// localStorage can throw (blocked site data, some private modes); the app must still load.
+const readStoredTheme = (): 'dark' | 'light' => {
+  try {
+    const saved = localStorage.getItem('inverta_theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch {
+    /* storage unavailable: fall back to default */
+  }
+  return 'dark';
+};
+
+const isAbortError = (err: unknown): boolean =>
+  err instanceof DOMException && err.name === 'AbortError';
+
+const isVideoFile = (file: File): boolean => file.type.startsWith('video/') || /\.mp4$/i.test(file.name);
+
 export const App: React.FC = () => {
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('inverta_theme');
-      if (saved === 'light' || saved === 'dark') return saved;
-    }
-    return 'dark';
-  });
+  const [theme, setTheme] = useState<'dark' | 'light'>(readStoredTheme);
 
   const [engineReady, setEngineReady] = useState(false);
   const [items, setItems] = useState<ProcessedItem[]>([]);
@@ -42,6 +52,15 @@ export const App: React.FC = () => {
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+  const settingsRef = useRef<WatermarkSettings>(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  // Only the most recent re-process job may publish its result; older video jobs are aborted.
+  const jobSeqRef = useRef(0);
+  const jobAbortRef = useRef<AbortController | null>(null);
+  const jobItemIdRef = useRef('');
 
   // Sync theme with HTML root class and local storage
   useEffect(() => {
@@ -51,7 +70,11 @@ export const App: React.FC = () => {
     } else {
       root.classList.remove('dark');
     }
-    localStorage.setItem('inverta_theme', theme);
+    try {
+      localStorage.setItem('inverta_theme', theme);
+    } catch {
+      /* storage unavailable: theme just won't persist */
+    }
   }, [theme]);
 
   const toggleTheme = useCallback(() => {
@@ -126,7 +149,11 @@ export const App: React.FC = () => {
 
   // Process a video item via WebCodecs MP4 pipeline
   const processVideoItem = useCallback(
-    async (item: ProcessedItem, currentSettings: WatermarkSettings): Promise<ProcessedItem> => {
+    async (
+      item: ProcessedItem,
+      currentSettings: WatermarkSettings,
+      signal?: AbortSignal
+    ): Promise<ProcessedItem> => {
       try {
         if (item.file.size > MAX_VIDEO_BYTES) {
           throw new Error(
@@ -145,6 +172,9 @@ export const App: React.FC = () => {
             fillMode: currentSettings.fillMode,
             fillThreshold: currentSettings.fillThreshold,
             fillRadius: currentSettings.fillRadius,
+            forcePosition: currentSettings.forcePosition
+              ? { x: currentSettings.forcePosition.x, y: currentSettings.forcePosition.y }
+              : null,
           },
           (prog) => {
             setItems((prev) =>
@@ -158,7 +188,8 @@ export const App: React.FC = () => {
                   : i
               )
             );
-          }
+          },
+          { originalFile: item.file, signal }
         );
 
         const cleanedUrl = URL.createObjectURL(videoRes.blob);
@@ -166,6 +197,7 @@ export const App: React.FC = () => {
           ...item,
           processedUrl: cleanedUrl,
           status: 'done',
+          videoFps: videoRes.fps,
           detectedVersion: videoRes.hasWatermark ? videoRes.detectedVersion : undefined,
           result: {
             success: true,
@@ -191,6 +223,7 @@ export const App: React.FC = () => {
           },
         };
       } catch (err: unknown) {
+        if (isAbortError(err)) throw err; // superseded by a newer job; the caller handles it
         console.error('Video processing error:', err);
         return {
           ...item,
@@ -209,7 +242,7 @@ export const App: React.FC = () => {
       if (!engineReady) await watermarkEngine.initialize();
 
       const newItems: ProcessedItem[] = files.map((file) => {
-        const isVideo = file.type.startsWith('video/') || file.name.endsWith('.mp4');
+        const isVideo = isVideoFile(file);
         return {
           id: Math.random().toString(36).substring(2, 9),
           file,
@@ -234,11 +267,13 @@ export const App: React.FC = () => {
       await new Promise((resolve) => setTimeout(resolve, 40));
 
       for (const item of newItems) {
+        // A manual nudge belongs to one specific file; never apply it to newly added ones.
+        const currentSettings: WatermarkSettings = { ...settingsRef.current, forcePosition: null };
         if (item.mediaType === 'video') {
-          const processed = await processVideoItem(item, settings);
+          const processed = await processVideoItem(item, currentSettings);
           setItems((prev) => prev.map((p) => (p.id === item.id ? processed : p)));
         } else {
-          const processed = await processImage(item, settings);
+          const processed = await processImage(item, currentSettings);
           setItems((prev) => prev.map((p) => (p.id === item.id ? processed : p)));
         }
         // Yield between items in batch
@@ -246,107 +281,159 @@ export const App: React.FC = () => {
       }
       setIsProcessing(false);
     },
-    [engineReady, processImage, processVideoItem, settings]
+    [engineReady, processImage, processVideoItem]
   );
 
-  // Re-process active item when settings or nudge change (with instant fast path)
+  // Re-process active item when settings or nudge change (with instant fast path).
+  // Reads the latest state from refs so the callback (and everything built on it) stays stable.
   const reprocessActiveItem = useCallback(
     async (newSettings: WatermarkSettings) => {
+      const activeItem = itemsRef.current.find((i) => i.id === activeIdRef.current);
       if (!activeItem) return;
+
+      // Supersede any job still running: abort it and make sure only this one can publish.
+      const jobId = ++jobSeqRef.current;
+      jobAbortRef.current?.abort();
+      const controller = new AbortController();
+      jobAbortRef.current = controller;
+      jobItemIdRef.current = activeItem.id;
+      const isLatest = () => jobId === jobSeqRef.current;
+
       setIsProcessing(true);
-      if (activeItem.mediaType === 'video') {
-        const prevProcessedUrl = activeItem.processedUrl;
-        const updated = await processVideoItem(activeItem, newSettings);
-        if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
-          URL.revokeObjectURL(prevProcessedUrl);
-        }
-        setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
-      } else if (activeItem.sourceImageData) {
-        // Fast path: Invert directly from cached memory buffer in ~3ms without re-rasterizing
-        try {
-          const { cleanImageData, result } = watermarkEngine.removeWatermark(
-            activeItem.sourceImageData,
-            newSettings
+      try {
+        if (activeItem.mediaType === 'video') {
+          const prevProcessedUrl = activeItem.processedUrl;
+          // Show progress instead of a frozen player while the video is re-encoded.
+          setItems((prev) =>
+            prev.map((i) =>
+              i.id === activeItem.id
+                ? { ...i, status: 'processing', videoProgress: { stage: 'demux', ratio: 0 } }
+                : i
+            )
           );
-          const canvas = document.createElement('canvas');
-          canvas.width = activeItem.sourceImageData.width;
-          canvas.height = activeItem.sourceImageData.height;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.putImageData(cleanImageData, 0, 0);
-            const cleanedBlob = await new Promise<Blob | null>((resolve) =>
-              canvas.toBlob((b) => resolve(b), activeItem.file.type || 'image/png')
-            );
-            if (activeItem.processedUrl && activeItem.processedUrl.startsWith('blob:')) {
-              URL.revokeObjectURL(activeItem.processedUrl);
+          const updated = await processVideoItem(activeItem, newSettings, controller.signal);
+          if (!isLatest()) {
+            if (updated.processedUrl && updated.processedUrl !== prevProcessedUrl) {
+              URL.revokeObjectURL(updated.processedUrl);
             }
-            const cleanedUrl = cleanedBlob ? URL.createObjectURL(cleanedBlob) : activeItem.originalUrl;
-            const updated: ProcessedItem = {
-              ...activeItem,
-              processedUrl: cleanedUrl,
-              processedImageData: cleanImageData,
-              status: 'done',
-              detectedVersion: result.detectedVersion,
-              result,
-            };
-            setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+            return;
           }
-        } catch (err) {
-          console.error('Fast reprocess error:', err);
+          if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
+            URL.revokeObjectURL(prevProcessedUrl);
+          }
+          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+        } else if (activeItem.sourceImageData) {
+          // Fast path: Invert directly from cached memory buffer in ~3ms without re-rasterizing
+          try {
+            const { cleanImageData, result } = watermarkEngine.removeWatermark(
+              activeItem.sourceImageData,
+              newSettings
+            );
+            const canvas = document.createElement('canvas');
+            canvas.width = activeItem.sourceImageData.width;
+            canvas.height = activeItem.sourceImageData.height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.putImageData(cleanImageData, 0, 0);
+              const cleanedBlob = await new Promise<Blob | null>((resolve) =>
+                canvas.toBlob((b) => resolve(b), activeItem.file.type || 'image/png')
+              );
+              const cleanedUrl = cleanedBlob ? URL.createObjectURL(cleanedBlob) : activeItem.originalUrl;
+              if (!isLatest()) {
+                if (cleanedBlob) URL.revokeObjectURL(cleanedUrl);
+                return;
+              }
+              if (activeItem.processedUrl && activeItem.processedUrl.startsWith('blob:')) {
+                URL.revokeObjectURL(activeItem.processedUrl);
+              }
+              const updated: ProcessedItem = {
+                ...activeItem,
+                processedUrl: cleanedUrl,
+                processedImageData: cleanImageData,
+                status: 'done',
+                detectedVersion: result.detectedVersion,
+                result,
+              };
+              setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+            }
+          } catch (err) {
+            console.error('Fast reprocess error:', err);
+          }
+        } else {
+          const prevProcessedUrl = activeItem.processedUrl;
+          const updated = await processImage(activeItem, newSettings);
+          if (!isLatest()) {
+            if (updated.processedUrl && updated.processedUrl !== prevProcessedUrl) {
+              URL.revokeObjectURL(updated.processedUrl);
+            }
+            return;
+          }
+          if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
+            URL.revokeObjectURL(prevProcessedUrl);
+          }
+          setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
         }
-      } else {
-        const prevProcessedUrl = activeItem.processedUrl;
-        const updated = await processImage(activeItem, newSettings);
-        if (prevProcessedUrl && prevProcessedUrl.startsWith('blob:') && prevProcessedUrl !== updated.processedUrl) {
-          URL.revokeObjectURL(prevProcessedUrl);
+      } catch (err) {
+        if (!isAbortError(err)) {
+          console.error('Reprocess error:', err);
+        } else if (jobItemIdRef.current !== activeItem.id) {
+          // The newer job is for another item, so nothing will finish this one: restore it.
+          setItems((prev) =>
+            prev.map((i) => (i.id === activeItem.id && i.status === 'processing' ? { ...activeItem } : i))
+          );
         }
-        setItems((prev) => prev.map((item) => (item.id === activeItem.id ? updated : item)));
+      } finally {
+        if (isLatest()) setIsProcessing(false);
       }
-      setIsProcessing(false);
     },
-    [activeItem, processImage, processVideoItem]
+    [processImage, processVideoItem]
   );
 
-  const handleUpdateSettings = (partial: Partial<WatermarkSettings>) => {
-    const updated = { ...settings, ...partial };
-    setSettings(updated);
-    reprocessActiveItem(updated);
-  };
+  const handleUpdateSettings = useCallback(
+    (partial: Partial<WatermarkSettings>) => {
+      const updated = { ...settingsRef.current, ...partial };
+      settingsRef.current = updated;
+      setSettings(updated);
+      void reprocessActiveItem(updated);
+    },
+    [reprocessActiveItem]
+  );
 
-  const handleResetSettings = () => {
+  const handleResetSettings = useCallback(() => {
+    settingsRef.current = DEFAULT_SETTINGS;
     setSettings(DEFAULT_SETTINGS);
-    reprocessActiveItem(DEFAULT_SETTINGS);
-  };
+    void reprocessActiveItem(DEFAULT_SETTINGS);
+  }, [reprocessActiveItem]);
 
-  const handleNudge = (dx: number, dy: number) => {
-    if (!activeItem?.result) return;
-    const currentPos = activeItem.result.position;
-    const currentSize = activeItem.result.size;
+  const handleNudge = useCallback(
+    (dx: number, dy: number) => {
+      const item = itemsRef.current.find((i) => i.id === activeIdRef.current);
+      if (!item?.result) return;
+      const updatedSettings: WatermarkSettings = {
+        ...settingsRef.current,
+        forcePosition: {
+          x: item.result.position.x + dx,
+          y: item.result.position.y + dy,
+          size: item.result.size,
+        },
+      };
+      settingsRef.current = updatedSettings;
+      setSettings(updatedSettings);
+      void reprocessActiveItem(updatedSettings);
+    },
+    [reprocessActiveItem]
+  );
 
-    const newForced = {
-      x: currentPos.x + dx,
-      y: currentPos.y + dy,
-      size: currentSize,
-    };
-
-    const updatedSettings = {
-      ...settings,
-      forcePosition: newForced,
-    };
-
-    setSettings(updatedSettings);
-    reprocessActiveItem(updatedSettings);
-  };
-
-  const handleDownload = () => {
-    if (!activeItem?.processedUrl) return;
+  const handleDownload = useCallback(() => {
+    const item = itemsRef.current.find((i) => i.id === activeIdRef.current);
+    if (!item?.processedUrl) return;
     const a = document.createElement('a');
-    a.href = activeItem.processedUrl;
-    a.download = `cleaned_${activeItem.name}`;
+    a.href = item.processedUrl;
+    a.download = `cleaned_${item.name}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-  };
+  }, []);
 
   const handleDownloadAll = useCallback(() => {
     itemsRef.current.forEach((item) => {
@@ -361,7 +448,15 @@ export const App: React.FC = () => {
     });
   }, []);
 
-  const handleSelectItem = useCallback((id: string) => setActiveId(id), []);
+  const handleSelectItem = useCallback((id: string) => {
+    setActiveId(id);
+    // The nudged position was set for the previous item; reset it so later edits don't misplace this one.
+    if (settingsRef.current.forcePosition) {
+      const cleared: WatermarkSettings = { ...settingsRef.current, forcePosition: null };
+      settingsRef.current = cleared;
+      setSettings(cleared);
+    }
+  }, []);
 
   const handleRemoveItem = useCallback((id: string) => {
     const items = itemsRef.current;
