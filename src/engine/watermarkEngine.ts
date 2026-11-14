@@ -5,6 +5,7 @@ import { nccAt, scanCorner } from './nccMatcher.ts';
 import { DEFAULT_SETTINGS } from './types.ts';
 import type {
   DetectionResult,
+  LogoVersion,
   RemovalResult,
   WatermarkCorner,
   WatermarkSettings,
@@ -52,10 +53,15 @@ export class WatermarkEngine {
     const { width, height, data } = imageData;
     const minDim = Math.min(width, height);
     const resScale = minDim / 1080;
+    const { logoSize: expectedLogoSize, margin: canonicalMargin } = this.getWatermarkConfig(width, height);
 
-    const versionsToTest: Array<'old' | 'new' | 'white'> =
+    const versionsToTest: Array<'sparkle' | 'classic' | 'new' | 'white' | 'old'> =
       s.logoVersion === 'auto'
-        ? (minDim <= 720 ? ['old'] : ['old', 'new'])
+        ? (minDim <= 720 ? ['sparkle'] : ['sparkle', 'new'])
+        : s.logoVersion === 'sparkle' || s.logoVersion === 'old'
+        ? ['sparkle', 'new']
+        : s.logoVersion === 'new'
+        ? ['new', 'sparkle']
         : [s.logoVersion];
 
     const computedClassic = Math.round(84 * resScale * s.maskScale);
@@ -77,10 +83,10 @@ export class WatermarkEngine {
       (a, b) => Math.abs(a - expectedSize) - Math.abs(b - expectedSize)
     );
 
-    const baseSizes: Array<{ size: number; version: 'old' | 'new' | 'white'; alphaMap: Float32Array }> = [];
+    const baseSizes: Array<{ size: number; version: 'sparkle' | 'classic' | 'new' | 'white' | 'old'; alphaMap: Float32Array }> = [];
     const pushCandidate = (
       size: number,
-      version: 'old' | 'new' | 'white',
+      version: 'sparkle' | 'classic' | 'new' | 'white' | 'old',
       alphaMap: Float32Array
     ) => {
       // A mask whose array length does not match its declared size cannot be
@@ -88,20 +94,26 @@ export class WatermarkEngine {
       if (isValidMask({ alphaMap, size })) baseSizes.push({ size, version, alphaMap });
     };
 
+    let pushed84 = false;
     for (const ver of versionsToTest) {
       for (const sz of targetSizes) {
         if (sz === 96) {
-          pushCandidate(96, ver, this.maskManager.getBaseMap(96, ver));
-        } else if (sz === 84 && ver === 'old') {
-          pushCandidate(84, ver, this.maskManager.getBaseMap(84, ver));
+          const v = ver === 'classic' ? 'classic' : ver === 'new' ? 'new' : ver === 'white' ? 'white' : 'sparkle';
+          pushCandidate(96, v, this.maskManager.getBaseMap(96, ver as LogoVersion));
+        } else if (sz === 84) {
+          if (!pushed84 && (ver === 'classic' || s.logoVersion === 'auto' || ver === 'sparkle' || ver === 'old')) {
+            pushed84 = true;
+            pushCandidate(84, 'classic', this.maskManager.getBaseMap(84, 'classic'));
+          }
         } else if (sz === 48) {
-          pushCandidate(48, ver, this.maskManager.getBaseMap(48, ver));
+          const v = ver === 'classic' ? 'classic' : ver === 'new' ? 'new' : ver === 'white' ? 'white' : 'sparkle';
+          pushCandidate(48, v, this.maskManager.getBaseMap(48, ver as LogoVersion));
         } else {
-          // New/white sparkle masks always derive from their native 48/96px
-          // assets; the 84px asset is the classic pairstar only.
-          const baseRef = sz > 64 ? 96 : ver === 'old' ? 84 : 48;
-          const scaled = this.maskManager.getScaledMask(baseRef, sz / baseRef, ver);
-          pushCandidate(scaled.size, ver, scaled.alphaMap);
+          // Scaled masks derive from their native assets
+          const baseRef = sz > 64 ? 96 : ver === 'classic' ? 84 : 48;
+          const scaled = this.maskManager.getScaledMask(baseRef, sz / baseRef, ver as LogoVersion);
+          const v = ver === 'classic' ? 'classic' : ver === 'new' ? 'new' : ver === 'white' ? 'white' : 'sparkle';
+          pushCandidate(scaled.size, v, scaled.alphaMap);
         }
       }
     }
@@ -126,12 +138,13 @@ export class WatermarkEngine {
 
     let bestCandidate: {
       size: number;
-      version: 'old' | 'new' | 'white';
+      version: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
       corner: WatermarkCorner;
       alphaMap: Float32Array;
       x: number;
       y: number;
       ncc: number;
+      effScore?: number;
       autoX: number;
       autoY: number;
       method: 'auto' | 'scan' | 'forced';
@@ -222,8 +235,14 @@ export class WatermarkEngine {
               }
 
               const score = nccAt(data, width, height, candidate.alphaMap, candidate.size, autoX, autoY);
+              const isCanonical =
+                cornerKey === 'bottom-right' &&
+                mx === canonicalMargin &&
+                my === canonicalMargin &&
+                candidate.size === expectedLogoSize;
+              const effScore = isCanonical ? score + 0.03 : score;
 
-              if (!bestCandidate || score > bestCandidate.ncc) {
+              if (!bestCandidate || effScore > (bestCandidate.effScore ?? bestCandidate.ncc)) {
                 bestCandidate = {
                   size: candidate.size,
                   version: candidate.version,
@@ -232,6 +251,7 @@ export class WatermarkEngine {
                   x: autoX,
                   y: autoY,
                   ncc: score,
+                  effScore,
                   autoX,
                   autoY,
                   method: 'auto',
@@ -268,7 +288,7 @@ export class WatermarkEngine {
               s.scanStride || 8,
               s.refineRadius || 6
             );
-            if (!bestCandidate || scan.ncc > bestCandidate.ncc) {
+            if (!bestCandidate || scan.ncc > (bestCandidate.effScore ?? bestCandidate.ncc)) {
               bestCandidate = {
                 size: candidate.size,
                 version: candidate.version,
@@ -277,6 +297,7 @@ export class WatermarkEngine {
                 x: scan.x,
                 y: scan.y,
                 ncc: scan.ncc,
+                effScore: scan.ncc,
                 autoX: scan.x,
                 autoY: scan.y,
                 method: 'scan',
@@ -371,7 +392,7 @@ export class WatermarkEngine {
     // Reuse the exact template that produced the detection. Re-deriving it from
     // detection.size would apply maskScale twice and could return a smaller
     // cached base map (e.g. a 48px map labelled as 72px).
-    const activeVersion = detection.detectedVersion || (s.logoVersion === 'auto' ? 'old' : s.logoVersion);
+    const activeVersion = detection.detectedVersion || (s.logoVersion === 'auto' ? 'sparkle' : s.logoVersion);
     const mask = detection.alphaMap;
     const maskSize = detection.maskSize ?? detection.size;
 

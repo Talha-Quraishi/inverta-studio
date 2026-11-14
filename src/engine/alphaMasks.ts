@@ -59,11 +59,8 @@ export class AlphaMaskManager {
   }
 
   public getBaseMap(size: number, version: LogoVersion): Float32Array {
-    if (size === 84) {
-      // The 84px asset is the classic paired star mask. New/white versions are
-      // derived from their native 48/96px assets by getScaledMask. Never reuse
-      // the 96px buffer here: declaring 96x96 data as 84x84 misaligns every
-      // correlation and removal lookup.
+    if (size === 84 || version === 'classic') {
+      // The 84px asset is the classic paired star mask.
       return this.alphaMap84Star || new Float32Array(84 * 84);
     }
     const is96 = size === 96;

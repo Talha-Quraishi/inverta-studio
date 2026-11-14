@@ -28,11 +28,12 @@ const VideoPlayerComparison = React.lazy(() =>
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function versionLabel(version?: 'old' | 'new' | 'white'): string {
-  if (version === 'old') return 'Classic Star';
+function versionLabel(version?: string, size?: number): string {
+  if (version === 'classic' || (version === 'old' && size === 84)) return 'Classic Dual-Star';
+  if (version === 'sparkle' || (version === 'old' && size !== 84)) return 'Gemini Sparkle';
   if (version === 'new') return '2026 Sparkle';
   if (version === 'white') return 'White Sparkle';
-  return 'Unknown';
+  return 'Gemini Sparkle';
 }
 
 /**
@@ -346,7 +347,7 @@ export const App: React.FC = () => {
           videoRes.playbackBlob && !item.playbackUrl
             ? URL.createObjectURL(videoRes.playbackBlob)
             : item.playbackUrl;
-        const detectedLabel = versionLabel(videoRes.detectedVersion);
+        const detectedLabel = versionLabel(videoRes.detectedVersion, videoRes.size);
 
         return {
           ...item,

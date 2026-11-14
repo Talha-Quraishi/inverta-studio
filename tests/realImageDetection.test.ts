@@ -53,11 +53,20 @@ test('detects and removes real watermark on high-res textured Diwali image in bo
   assert.equal(result.size, 96);
   assert.equal(result.x, 2592);
   assert.equal(result.y, 1376);
+  assert.equal(result.detectedVersion, 'sparkle');
   assert.ok(result.ncc >= 0.50, `ncc was ${result.ncc}, expected >= 0.50`);
 
   const removal = engine.removeWatermark(imgData);
   assert.equal(removal.result.success, true);
   assert.equal(removal.result.position.x, 2592);
   assert.equal(removal.result.position.y, 1376);
+  assert.equal(removal.result.detectedVersion, 'sparkle');
   assert.ok(removal.result.pixelsModified > 5000);
+
+  // Test explicit sparkle selection
+  const forcedSparkle = engine.detect(imgData, { logoVersion: 'sparkle' });
+  assert.equal(forcedSparkle.detected, true);
+  assert.equal(forcedSparkle.x, 2592);
+  assert.equal(forcedSparkle.y, 1376);
+  assert.equal(forcedSparkle.detectedVersion, 'sparkle');
 });

@@ -108,9 +108,10 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
       ? 'Export Cleaned Video (MP4)'
       : 'Export Cleaned Image';
 
-  const formatVersionLabel = (v?: 'old' | 'new' | 'white', size?: number) => {
+  const formatVersionLabel = (v?: 'sparkle' | 'classic' | 'new' | 'white' | 'old', size?: number) => {
     const sizeStr = size ? ` (${size}px)` : '';
-    if (v === 'old') return `Classic Star${sizeStr}`;
+    if (v === 'sparkle' || (v === 'old' && size !== 84)) return `Gemini Sparkle${sizeStr}`;
+    if (v === 'classic' || (v === 'old' && size === 84)) return `Classic Dual-Star${sizeStr}`;
     if (v === 'new') return `2026 Sparkle${sizeStr}`;
     if (v === 'white') return `White Sparkle${sizeStr}`;
     return 'Unknown';
@@ -293,7 +294,15 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           <span className="text-zinc-700 dark:text-zinc-400 font-medium">Watermark Template</span>
           {hasDetection && result.detectedVersion && settings.logoVersion === 'auto' && (
             <span className="text-[10px] font-mono text-zinc-500">
-              Matched: {result.detectedVersion}
+              Matched: {
+                result.detectedVersion === 'classic' || (result.detectedVersion === 'old' && result.size === 84)
+                  ? 'classic'
+                  : result.detectedVersion === 'new'
+                    ? '2026'
+                    : result.detectedVersion === 'white'
+                      ? 'white'
+                      : 'sparkle'
+              }
             </span>
           )}
         </div>
@@ -302,21 +311,30 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           aria-label="Watermark template version"
           className="grid grid-cols-4 gap-1 p-0.5 rounded-lg bg-zinc-100 dark:bg-[#0c0d10] border border-zinc-200 dark:border-white/[0.06]"
         >
-          {(['auto', 'old', 'new', 'white'] as LogoVersion[]).map((v) => {
-            const isActive = settings.logoVersion === v;
+          {(
+            [
+              { id: 'auto', label: 'Auto' },
+              { id: 'sparkle', label: 'Sparkle' },
+              { id: 'classic', label: 'Classic' },
+              { id: 'white', label: 'White' },
+            ] as const
+          ).map(({ id, label }) => {
+            const isActive =
+              settings.logoVersion === id ||
+              (id === 'sparkle' && (settings.logoVersion === 'new' || settings.logoVersion === 'old'));
             return (
               <button
-                key={v}
+                key={id}
                 type="button"
                 aria-pressed={isActive}
-                onClick={() => onUpdateSettings({ logoVersion: v })}
+                onClick={() => onUpdateSettings({ logoVersion: id as LogoVersion })}
                 className={`py-1.5 px-1 rounded-md text-[11px] font-mono text-center transition-colors cursor-pointer ${
                   isActive
                     ? 'bg-white text-zinc-950 font-semibold shadow-xs border border-zinc-300 dark:bg-white/[0.12] dark:text-white dark:border-white/[0.12]'
                     : 'text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-200'
                 }`}
               >
-                {v === 'auto' ? 'Auto' : v === 'old' ? 'Classic' : v === 'new' ? 'Sparkle' : 'White'}
+                {label}
               </button>
             );
           })}

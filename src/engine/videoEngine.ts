@@ -1,7 +1,7 @@
 import { createFile, DataStream } from 'mp4box';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { diffusionFill, dilateMask } from './diffusionFill';
-import type { WatermarkCorner } from './types';
+import type { LogoVersion, WatermarkCorner } from './types';
 import { resolveAssetUrl } from '../utils/assetUrl';
 import { buildSeekablePlaybackBuffer, getRotationDegrees } from './mp4Utils.ts';
 export { buildSeekablePlaybackBuffer, getRotationDegrees };
@@ -19,7 +19,7 @@ export interface VideoSettings {
   bitrateMult: number;
   corrThreshold: number;
   maskScale: number;
-  logoVersion: 'auto' | 'old' | 'new' | 'white';
+  logoVersion: LogoVersion;
   corner: WatermarkCorner;
   fillMode: 'auto' | 'on' | 'off';
   fillThreshold: number;
@@ -51,7 +51,7 @@ export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
 export interface VideoProgress {
   stage: 'demux' | 'process' | 'mux' | 'done';
   ratio: number;
-  detectedVersion?: 'old' | 'new' | 'white';
+  detectedVersion?: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
   detectedCorner?: WatermarkCorner;
 }
 
@@ -165,12 +165,12 @@ export interface MaskCandidateSpec {
   alphaMap: AlphaMapData;
   baseMaskSize: number;
   maskSize: number;
-  version: 'old' | 'new' | 'white';
+  version: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
 }
 
 export async function getMaskData(
   is1080p: boolean,
-  logoVersion: 'old' | 'new' | 'white',
+  logoVersion: 'sparkle' | 'classic' | 'new' | 'white' | 'old',
   maskScale: number
 ): Promise<MaskCandidateSpec> {
   let maskUrl: string;
@@ -185,8 +185,12 @@ export async function getMaskData(
     maskUrl = is1080p ? '/masks/sparkle-hw-96.png' : '/masks/sparkle-hw-48.png';
     withColor = false;
     baseMaskSize = is1080p ? 96 : 48;
+  } else if (logoVersion === 'sparkle') {
+    maskUrl = is1080p ? '/masks/bg_96.png' : '/masks/bg_48.png';
+    withColor = false;
+    baseMaskSize = is1080p ? 96 : 48;
   } else {
-    // 'old' Classic Gemini Star: 84px RGBA for 1080p, 48px for 720p
+    // 'classic' or 'old': 84px RGBA for 1080p, 48px for 720p
     maskUrl = is1080p ? '/masks/gemini-star_paired_star_mask.png' : '/masks/bg_48.png';
     withColor = is1080p;
     baseMaskSize = is1080p ? 84 : 48;
@@ -203,7 +207,7 @@ export async function getMaskData(
 }
 
 export async function loadAllMaskCandidates(
-  logoVersion: 'auto' | 'old' | 'new' | 'white',
+  logoVersion: LogoVersion,
   maskScale: number,
   width?: number,
   height?: number
@@ -214,9 +218,13 @@ export async function loadAllMaskCandidates(
 
   // At <= 720p, Google video watermarks are strictly the Classic Star (48px / bg_48).
   // 2026 Sparkle is exclusive to 1080p+ models (or when explicitly forced by user).
-  const versions: Array<'old' | 'new' | 'white'> =
+  const versions: Array<'sparkle' | 'classic' | 'new' | 'white' | 'old'> =
     logoVersion === 'auto'
-      ? (minDim <= 720 ? ['old'] : ['old', 'new'])
+      ? (minDim <= 720 ? ['classic'] : ['classic', 'new', 'sparkle'])
+      : logoVersion === 'sparkle' || logoVersion === 'old'
+      ? ['sparkle', 'new']
+      : logoVersion === 'classic'
+      ? ['classic']
       : [logoVersion];
 
   const cClassic = Math.round(84 * resScale * maskScale);
@@ -607,7 +615,7 @@ export interface TargetCandidate {
   opacity: number;
   baseStrength: number;
   method: string;
-  version: 'old' | 'new' | 'white';
+  version: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
   corner: WatermarkCorner;
   hasWatermark: boolean;
   edgeCleanup?: { strength: number; radius: number; maxPasses: number };
@@ -1381,7 +1389,7 @@ export interface VideoProcessResult {
   /** Optional seekable proxy of the source (same encoded samples, corrected stss). */
   playbackBlob?: Blob;
   hasWatermark: boolean;
-  detectedVersion: 'old' | 'new' | 'white';
+  detectedVersion: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
   detectedCorner?: WatermarkCorner;
   confidence: number;
   position: { x: number; y: number };
@@ -1897,7 +1905,7 @@ export async function processVideo(
       blob: new Blob([videoBuffer], { type: 'video/mp4' }),
       playbackBlob,
       hasWatermark: false,
-      detectedVersion: s.logoVersion === 'auto' ? 'old' : s.logoVersion,
+      detectedVersion: s.logoVersion === 'auto' ? 'classic' : s.logoVersion,
       confidence: detectionScore,
       position: { x: 0, y: 0 },
       size: 0,

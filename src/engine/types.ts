@@ -1,4 +1,4 @@
-export type LogoVersion = 'auto' | 'old' | 'new' | 'white';
+export type LogoVersion = 'auto' | 'sparkle' | 'classic' | 'new' | 'white' | 'old';
 export type FillMode = 'auto' | 'on' | 'off';
 export type WatermarkCorner = 'auto' | 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
 
@@ -50,7 +50,7 @@ export interface DetectionResult {
   autoY: number;
   drifted: boolean;
   gainApplied: number;
-  detectedVersion?: 'old' | 'new' | 'white';
+  detectedVersion?: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
   detectedCorner?: WatermarkCorner;
   /**
    * Exact template that produced this result. Removal must reuse this mask
@@ -72,7 +72,7 @@ export interface RemovalResult {
   method: 'auto' | 'scan' | 'forced';
   drifted: boolean;
   gainApplied: number;
-  detectedVersion?: 'old' | 'new' | 'white';
+  detectedVersion?: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
   detectedCorner?: WatermarkCorner;
 }
 
@@ -97,6 +97,6 @@ export interface ProcessedItem {
   status: 'idle' | 'processing' | 'done' | 'error';
   result?: RemovalResult;
   videoProgress?: { stage: string; ratio: number };
-  detectedVersion?: 'old' | 'new' | 'white';
+  detectedVersion?: 'sparkle' | 'classic' | 'new' | 'white' | 'old';
   error?: string;
 }

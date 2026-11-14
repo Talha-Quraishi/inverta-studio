@@ -224,7 +224,15 @@ export const ComparisonSlider: React.FC<ComparisonSliderProps> = ({
                 </span>
                 {result.detectedVersion && (
                   <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
-                    Template: {result.detectedVersion === 'old' ? 'Classic Star' : result.detectedVersion === 'new' ? '2026 Sparkle' : 'White Sparkle'}
+                    Template: {
+                      result.detectedVersion === 'classic' || (result.detectedVersion === 'old' && result.size === 84)
+                        ? 'Classic Dual-Star'
+                        : result.detectedVersion === 'new'
+                          ? '2026 Sparkle'
+                          : result.detectedVersion === 'white'
+                            ? 'White Sparkle'
+                            : 'Gemini Sparkle'
+                    }
                   </span>
                 )}
               </>

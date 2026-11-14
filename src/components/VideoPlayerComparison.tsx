@@ -395,7 +395,15 @@ export const VideoPlayerComparison: React.FC<VideoPlayerComparisonProps> = ({ it
           </span>
           {item.detectedVersion && (
             <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-white/[0.04] text-zinc-700 dark:text-zinc-300 font-mono text-[11px] border border-zinc-200 dark:border-white/[0.06]">
-              Template: {item.detectedVersion === 'old' ? 'Classic Star' : item.detectedVersion === 'new' ? '2026 Sparkle' : 'White Sparkle'}
+              Template: {
+                item.detectedVersion === 'classic' || (item.detectedVersion === 'old' && item.result?.size === 84)
+                  ? 'Classic Dual-Star'
+                  : item.detectedVersion === 'new'
+                    ? '2026 Sparkle'
+                    : item.detectedVersion === 'white'
+                      ? 'White Sparkle'
+                      : 'Gemini Sparkle'
+              }
             </span>
           )}
         </div>
